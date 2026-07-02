@@ -1,0 +1,11 @@
+id,title,type,country,year,dcCreator,dcDescription,medium,repository
+001,"Kirche St. Pierre, Besançon",IMAGE,Germany,,https://d-nb.info/gnd/143212966,"Fotografie: Kirche St. Pierre, Besançon",,Deutsche Fotothek
+002,Portrait of a Woman,Painting,Netherlands,1632,Unknown,Oil portrait,oil on panel,Rijksmuseum
+003,Amphora,Object,Italy,,,Ceramic vessel,ceramic,Museo Archeologico
+004,Manuscript leaf,TEXT,France,1450,,Illuminated manuscript fragment,parchment,BnF
+005,Bridge over river,IMAGE,,1905,A. Photographer,,photograph,
+006,Wooden chair,Object,Sweden,,,Furniture,wood,Nordiska museet
+007,Map of the coastline,Map,Portugal,1578,Cartographer,Hand-coloured map,ink on paper,Biblioteca Nacional
+008,Silver coin,Object,Greece,,,Ancient coin,silver,Numismatic Museum
+009,Landscape with windmill,Painting,Netherlands,,Studio of Master,Rural landscape,oil on canvas,
+010,Choral score,TEXT,Austria,1791,Composer,Musical manuscript,paper,Österreichische Nationalbibliothek

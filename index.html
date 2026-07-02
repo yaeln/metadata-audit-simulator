@@ -1,0 +1,1098 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Metadata Audit Simulator: Session Mode</title>
+
+    <!-- Load Tailwind CSS (play CDN: no versioned URL available) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Load React and ReactDOM (pinned versions) -->
+    <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+
+    <!-- Load Babel for in-browser JSX parsing (major pinned to 7.x) -->
+    <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+
+    <!-- Load JSZip for creating / reading the export bundle (pinned) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans pb-20">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useMemo, useEffect } = React;
+
+        // --- Available image models -----------------------------------------
+        // api: 'imagen'  -> POST :predict        { instances:[{prompt}] }       -> predictions[0].bytesBase64Encoded
+        // api: 'gemini'  -> POST :generateContent { contents:[...] }            -> candidates[0].content.parts[].inlineData.data
+        // Tiers are approximate and change over time — students should check
+        // Google's current pricing/availability for their own key.
+        const MODELS = [
+          { id: 'imagen-4.0-generate-001',                  label: 'Imagen 4 — highest quality',          api: 'imagen', tier: 'usually requires billing' },
+          { id: 'imagen-3.0-generate-002',                  label: 'Imagen 3',                             api: 'imagen', tier: 'usually requires billing' },
+          { id: 'gemini-2.5-flash-image',                   label: 'Gemini 2.5 Flash Image ("Nano Banana")', api: 'gemini', tier: 'may require billing' },
+          { id: 'gemini-2.0-flash-preview-image-generation', label: 'Gemini 2.0 Flash (image generation)', api: 'gemini', tier: 'often available on free tier' },
+        ];
+        const CUSTOM = '__custom__';
+
+        // --- IndexedDB helpers (store full sessions, incl. base64 images) ---
+        function idbOpen() {
+          return new Promise((resolve, reject) => {
+            const req = indexedDB.open('metadata-audit', 1);
+            req.onupgradeneeded = () => { req.result.createObjectStore('sessions'); };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+          });
+        }
+        async function idbSet(key, value) {
+          const db = await idbOpen();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction('sessions', 'readwrite');
+            tx.objectStore('sessions').put(value, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          });
+        }
+        async function idbGet(key) {
+          const db = await idbOpen();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction('sessions', 'readonly');
+            const rq = tx.objectStore('sessions').get(key);
+            rq.onsuccess = () => resolve(rq.result);
+            rq.onerror = () => reject(rq.error);
+          });
+        }
+
+        // Stable fingerprint for a dataset so we can match saved sessions.
+        function fingerprint(headers, data) {
+          const s = headers.join('|') + '#' + data.length + '#' + (data[0] ? JSON.stringify(data[0]) : '');
+          let h = 0;
+          for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+          return 'ds_' + h.toString(16);
+        }
+
+        // A record holds the per-row audit notes plus an array of generation "runs".
+        // Accepts older single-image records and upgrades them to the runs shape.
+        function normalizeRecord(rec) {
+          if (!rec) return { auditNotes: '', runs: [] };
+          if (Array.isArray(rec.runs)) return { auditNotes: rec.auditNotes || '', runs: rec.runs };
+          const runs = rec.imageBase64 ? [{
+            imageBase64: rec.imageBase64,
+            timestamp: rec.timestamp || '',
+            promptText: rec.promptText || '',
+            selectedColumns: rec.selectedColumns || [],
+            model: rec.model || ''
+          }] : [];
+          return { auditNotes: rec.auditNotes || '', runs };
+        }
+
+        // --- Demo image (no API call): deterministic placeholder ------------
+        function wrapText(ctx, text, x, y, maxWidth, lineHeight, maxLines) {
+          const words = text.split(' ');
+          let line = '', lines = 0;
+          for (let n = 0; n < words.length; n++) {
+            const test = line + words[n] + ' ';
+            if (ctx.measureText(test).width > maxWidth && line !== '') {
+              ctx.fillText(line.trim(), x, y);
+              line = words[n] + ' ';
+              y += lineHeight;
+              if (++lines >= maxLines - 1) { ctx.fillText(line.trim() + ' …', x, y); return; }
+            } else {
+              line = test;
+            }
+          }
+          ctx.fillText(line.trim(), x, y);
+        }
+        function makeDemoImage(prompt) {
+          const SIZE = 768;
+          const canvas = document.createElement('canvas');
+          canvas.width = SIZE; canvas.height = SIZE;
+          const ctx = canvas.getContext('2d');
+
+          let h = 0;
+          for (let i = 0; i < prompt.length; i++) h = (h * 31 + prompt.charCodeAt(i)) >>> 0;
+          const hue = h % 360;
+
+          const grad = ctx.createLinearGradient(0, 0, SIZE, SIZE);
+          grad.addColorStop(0, `hsl(${hue} 60% 55%)`);
+          grad.addColorStop(1, `hsl(${(hue + 80) % 360} 55% 32%)`);
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, 0, SIZE, SIZE);
+
+          for (let i = 0; i < 6; i++) {
+            h = (h * 1103515245 + 12345) >>> 0; const cx = h % SIZE;
+            h = (h * 1103515245 + 12345) >>> 0; const cy = h % SIZE;
+            h = (h * 1103515245 + 12345) >>> 0; const r = 50 + (h % 180);
+            ctx.fillStyle = `hsla(${(hue + i * 40) % 360} 70% 75% / 0.22)`;
+            ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+          }
+
+          ctx.fillStyle = 'rgba(0,0,0,0.55)';
+          ctx.fillRect(0, 290, SIZE, 188);
+          ctx.fillStyle = '#fff';
+          ctx.textAlign = 'center';
+          ctx.font = 'bold 30px sans-serif';
+          ctx.fillText('DEMO MODE — no AI call', SIZE / 2, 335);
+          ctx.font = '16px monospace';
+          wrapText(ctx, prompt, SIZE / 2, 372, 680, 22, 5);
+          return canvas.toDataURL('image/png');
+        }
+
+        // --- Friendly API errors --------------------------------------------
+        function apiError(status, data) {
+          const msg = (data && data.error && data.error.message) ? ` — ${data.error.message}` : '';
+          if (status === 400) return new Error(`Bad request (400). The model may not support image generation, or the prompt was rejected.${msg}`);
+          if (status === 401 || status === 403) return new Error(`Access denied (${status}). Your key may be invalid/restricted, or this model needs billing enabled on your Google account.${msg}`);
+          if (status === 404) return new Error(`Model not found (404). Check the model name.${msg}`);
+          if (status === 429) {
+            const txt = (data && data.error && data.error.message) || '';
+            if (/limit:\s*0|free_tier/i.test(txt)) {
+              return new Error(`Image generation isn't available on this key's FREE tier (quota is 0). To generate images you must enable billing on the Google account for this key — image models (Imagen + Gemini image) are paid-only. Until then, use Demo Mode.${msg}`);
+            }
+            return new Error(`Rate limit reached (429). You're sending requests too fast — wait a few seconds and try again.${msg}`);
+          }
+          return new Error(`API error (${status}).${msg}`);
+        }
+
+        async function callImagen(model, key, prompt) {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:predict?key=${key}`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ instances: [{ prompt }], parameters: { sampleCount: 1 } }) }
+          );
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) throw apiError(res.status, data);
+          const b64 = data.predictions && data.predictions[0] && data.predictions[0].bytesBase64Encoded;
+          if (!b64) throw new Error('The model returned no image.');
+          return `data:image/png;base64,${b64}`;
+        }
+
+        async function callGemini(model, key, prompt) {
+          const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                generationConfig: { responseModalities: ['IMAGE', 'TEXT'] }
+              }) }
+          );
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) throw apiError(res.status, data);
+          const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+          const part = parts.find(p => (p.inlineData && p.inlineData.data) || (p.inline_data && p.inline_data.data));
+          const inline = part && (part.inlineData || part.inline_data);
+          if (!inline || !inline.data) throw new Error('The model returned only text (or refused) — no image. Try an Imagen model or rephrase.');
+          const mime = inline.mimeType || inline.mime_type || 'image/png';
+          return `data:${mime};base64,${inline.data}`;
+        }
+
+        // Students route through the class proxy (no key in the browser).
+        async function callProxy(url, code, model, prompt) {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: model.id, api: model.api, prompt, code })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) throw new Error(data.error || `Proxy error (${res.status}).`);
+          if (!data.image) throw new Error('The proxy returned no image.');
+          return data.image;
+        }
+
+        // --- Inline Icons ---
+        const IconUpload = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>;
+        const IconImage = ({ size = 24, className = "" }) => <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>;
+        const IconAlert = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>;
+        const IconFileText = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>;
+        const IconCheck = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="m9 12 2 2 4-4"/></svg>;
+        const IconChevronRight = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"/></svg>;
+        const IconChevronLeft = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>;
+        const IconDatabase = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>;
+        const IconChevronDown = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>;
+        const IconChevronUp = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"/></svg>;
+        const IconSettings = () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>;
+        const IconSearch = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>;
+        const IconKey = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>;
+        const IconArchive = () => <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>;
+
+        function App() {
+          const [apiKey, setApiKey] = useState('');
+          const [modelId, setModelId] = useState(MODELS[0].id);
+          const [customModelId, setCustomModelId] = useState('');
+          const [customApiType, setCustomApiType] = useState('imagen');
+          const [demoMode, setDemoMode] = useState(false);
+          const [discovered, setDiscovered] = useState([]);
+          const [detecting, setDetecting] = useState(false);
+          const [proxyUrl, setProxyUrl] = useState(() => { try { return localStorage.getItem('audit_proxy_url') || ''; } catch (e) { return ''; } });
+          const [classCode, setClassCode] = useState(() => { try { return localStorage.getItem('audit_class_code') || ''; } catch (e) { return ''; } });
+          const [activeRunIndex, setActiveRunIndex] = useState(0);
+          const [filterColumn, setFilterColumn] = useState('');
+          const [filterText, setFilterText] = useState('');
+          const [collectionContext, setCollectionContext] = useState('');
+
+          const [csvData, setCsvData] = useState([]);
+          const [columns, setColumns] = useState([]);
+          const [selectedColumns, setSelectedColumns] = useState([]);
+          const [columnSearch, setColumnSearch] = useState('');
+
+          const [currentIndex, setCurrentIndex] = useState(-1);
+          const [sessionData, setSessionData] = useState({});
+          const [datasetKey, setDatasetKey] = useState(null);
+          const [datasetName, setDatasetName] = useState('');
+          const [lastSaved, setLastSaved] = useState(null);
+
+          const [generatedImage, setGeneratedImage] = useState(null);
+          const [isGenerating, setIsGenerating] = useState(false);
+          const [auditNotes, setAuditNotes] = useState('');
+
+          const [error, setError] = useState(null);
+          const [showFullData, setShowFullData] = useState(false);
+          const fileInputRef = useRef(null);
+          const importInputRef = useRef(null);
+          const saveTimer = useRef(null);
+
+          const activeModel = useMemo(() => {
+            if (modelId === CUSTOM) return { id: customModelId.trim(), api: customApiType, tier: 'custom — verify availability', label: 'Custom' };
+            return [...MODELS, ...discovered].find(m => m.id === modelId) || MODELS[0];
+          }, [modelId, customModelId, customApiType, discovered]);
+
+          // Ask the API which image-capable models this key can actually use.
+          const handleDetectModels = async () => {
+            if (!apiKey) { setError('Paste your API key first, then click Detect.'); return; }
+            setDetecting(true);
+            setError(null);
+            try {
+              const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}&pageSize=1000`);
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok || data.error) throw apiError(res.status, data);
+              const found = (data.models || []).map(m => {
+                const id = (m.name || '').replace(/^models\//, '');
+                const methods = m.supportedGenerationMethods || [];
+                const isImagen = methods.includes('predict');
+                const isGeminiImage = methods.includes('generateContent') && /image/i.test(id);
+                if (!isImagen && !isGeminiImage) return null;
+                return { id, api: isImagen ? 'imagen' : 'gemini', label: `${m.displayName || id} (detected)`, tier: 'available on your key' };
+              }).filter(Boolean);
+
+              if (found.length === 0) {
+                setError('No image-capable models were found for this key. Your account may need billing enabled for image generation.');
+              } else {
+                setDiscovered(found);
+                setModelId(found[0].id);
+              }
+            } catch (err) {
+              setError(`Could not list models: ${err.message}`);
+            } finally {
+              setDetecting(false);
+            }
+          };
+
+          // Remember the class connection (URL + code) so students don't retype it.
+          // The API key is intentionally NOT persisted.
+          useEffect(() => { try { localStorage.setItem('audit_proxy_url', proxyUrl); } catch (e) {} }, [proxyUrl]);
+          useEffect(() => { try { localStorage.setItem('audit_class_code', classCode); } catch (e) {} }, [classCode]);
+
+          const parseCSV = (text) => {
+            const rows = [];
+            let currentRow = [];
+            let currentCell = '';
+            let inQuotes = false;
+
+            for (let i = 0; i < text.length; i++) {
+              const char = text[i];
+              if (char === '"' && text[i + 1] === '"') {
+                currentCell += '"'; i++;
+              } else if (char === '"') {
+                inQuotes = !inQuotes;
+              } else if (char === ',' && !inQuotes) {
+                currentRow.push(currentCell); currentCell = '';
+              } else if ((char === '\n' || char === '\r') && !inQuotes) {
+                if (char === '\r' && text[i + 1] === '\n') i++;
+                currentRow.push(currentCell.trim());
+                if (currentRow.some(cell => cell !== '')) rows.push(currentRow);
+                currentRow = []; currentCell = '';
+              } else {
+                currentCell += char;
+              }
+            }
+            if (currentRow.length > 0 || currentCell !== '') {
+              currentRow.push(currentCell.trim()); rows.push(currentRow);
+            }
+
+            if (rows.length < 2) throw new Error("CSV doesn't contain enough data.");
+
+            const headers = rows[0].map(h => h.trim());
+            return {
+              headers,
+              data: rows.slice(1).map(row => {
+                const obj = {};
+                headers.forEach((header, index) => { obj[header] = row[index] !== undefined ? row[index] : ''; });
+                return obj;
+              })
+            };
+          };
+
+          const handleFileUpload = (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              try {
+                const { headers, data } = parseCSV(e.target.result);
+                setColumns(headers);
+                setCsvData(data);
+                setDatasetName(file.name);
+                setError(null);
+
+                const defaultCols = headers.filter(h => ['title', 'type', 'country', 'dcDescription', 'year'].includes(h.toLowerCase()));
+                setSelectedColumns(defaultCols.length > 0 ? defaultCols : headers.slice(0, Math.min(4, headers.length)));
+
+                setCurrentIndex(0);
+                setSessionData({});
+                setGeneratedImage(null);
+                setAuditNotes('');
+                setCollectionContext('');
+                setFilterColumn('');
+                setFilterText('');
+
+                // Offer to restore an autosaved session for this exact dataset.
+                const fp = fingerprint(headers, data);
+                setDatasetKey(fp);
+                idbGet(fp).then(saved => {
+                  if (saved && saved.sessionData && Object.keys(saved.sessionData).length) {
+                    const when = saved.savedAt ? new Date(saved.savedAt).toLocaleString() : 'earlier';
+                    if (window.confirm(`Found an autosaved session for this dataset (${Object.keys(saved.sessionData).length} audited records, saved ${when}). Restore it?`)) {
+                      setSessionData(saved.sessionData);
+                      if (saved.selectedColumns) setSelectedColumns(saved.selectedColumns);
+                      if (saved.collectionContext) setCollectionContext(saved.collectionContext);
+                      setCurrentIndex(0);
+                      const first = normalizeRecord(saved.sessionData[0]);
+                      const lastRun = first.runs.length ? first.runs[first.runs.length - 1] : null;
+                      setActiveRunIndex(first.runs.length ? first.runs.length - 1 : 0);
+                      setGeneratedImage(lastRun ? (lastRun.imageBase64 || null) : null);
+                      setAuditNotes(first.auditNotes);
+                    }
+                  }
+                }).catch(() => {});
+              } catch (err) {
+                setError("Error parsing CSV. Please ensure it's a valid comma-separated file.");
+              }
+            };
+            reader.readAsText(file);
+          };
+
+          // Autosave session to IndexedDB (debounced). The API key is NOT stored.
+          useEffect(() => {
+            if (!datasetKey) return;
+            if (Object.keys(sessionData).length === 0 && !collectionContext) return;
+            if (saveTimer.current) clearTimeout(saveTimer.current);
+            saveTimer.current = setTimeout(() => {
+              idbSet(datasetKey, { sessionData, selectedColumns, columns, rows: csvData, datasetName, collectionContext, savedAt: Date.now() })
+                .then(() => setLastSaved(new Date()))
+                .catch(() => {});
+            }, 600);
+          }, [sessionData, selectedColumns, datasetKey, collectionContext]);
+
+          const saveCurrentToSession = () => {
+            if (currentIndex < 0) return;
+            setSessionData(prev => {
+              const cur = normalizeRecord(prev[currentIndex]);
+              if (cur.runs.length === 0 && !auditNotes) return prev;
+              return { ...prev, [currentIndex]: { auditNotes, runs: cur.runs } };
+            });
+          };
+
+          const loadFromSession = (index) => {
+            const rec = normalizeRecord(sessionData[index]);
+            setAuditNotes(rec.auditNotes);
+            if (rec.runs.length) {
+              const last = rec.runs.length - 1;
+              setActiveRunIndex(last);
+              setGeneratedImage(rec.runs[last].imageBase64 || null);
+            } else {
+              setActiveRunIndex(0);
+              setGeneratedImage(null);
+            }
+            setShowFullData(false);
+          };
+
+          // The records currently reachable, given the optional filter/search.
+          const filteredIndices = useMemo(() => {
+            const all = csvData.map((_, i) => i);
+            const q = filterText.trim().toLowerCase();
+            if (!q) return all;
+            return all.filter(i => {
+              const row = csvData[i];
+              if (filterColumn) return String(row[filterColumn] || '').toLowerCase().includes(q);
+              return Object.values(row).some(v => String(v || '').toLowerCase().includes(q));
+            });
+          }, [csvData, filterColumn, filterText]);
+
+          // If the filter no longer includes the current record, jump to the first match.
+          useEffect(() => {
+            if (csvData.length === 0 || filteredIndices.length === 0) return;
+            if (!filteredIndices.includes(currentIndex)) {
+              const ni = filteredIndices[0];
+              setCurrentIndex(ni);
+              loadFromSession(ni);
+            }
+          }, [filteredIndices]);
+
+          const goTo = (newIndex) => {
+            saveCurrentToSession();
+            setCurrentIndex(newIndex);
+            loadFromSession(newIndex);
+          };
+
+          const handleNavigate = (direction) => {
+            const pos = filteredIndices.indexOf(currentIndex);
+            const newPos = pos + direction;
+            if (newPos >= 0 && newPos < filteredIndices.length) goTo(filteredIndices[newPos]);
+          };
+
+          const handleRandom = () => {
+            if (filteredIndices.length === 0) return;
+            goTo(filteredIndices[Math.floor(Math.random() * filteredIndices.length)]);
+          };
+
+          const handleNotesChange = (e) => {
+            const val = e.target.value;
+            setAuditNotes(val);
+            setSessionData(prev => {
+              const cur = normalizeRecord(prev[currentIndex]);
+              return { ...prev, [currentIndex]: { auditNotes: val, runs: cur.runs } };
+            });
+          };
+
+          const toggleColumn = (col) => {
+            setSelectedColumns(prev => prev.includes(col) ? prev.filter(c => c !== col) : [...prev, col]);
+          };
+
+          const buildPrompt = (rowIndex = currentIndex) => {
+            const row = csvData[rowIndex];
+            if (!row || selectedColumns.length === 0) return "";
+            const fields = selectedColumns.map(field => `${field.toUpperCase()}: ${row[field] ? row[field] : 'NULL'}`).join(' | ');
+            const ctx = collectionContext.trim();
+            return ctx ? `COLLECTION CONTEXT: ${ctx} | ${fields}` : fields;
+          };
+
+          const handleGenerate = async () => {
+            const promptText = buildPrompt();
+            if (!promptText) return;
+
+            if (!demoMode && !proxyUrl && !apiKey) {
+              setError("Nothing to generate with. Enter the class Proxy URL (students), or paste an API key, or turn on Demo Mode.");
+              return;
+            }
+            if (!demoMode && modelId === CUSTOM && !activeModel.id) {
+              setError("Enter a custom model name, or pick one from the dropdown.");
+              return;
+            }
+
+            setIsGenerating(true);
+            setError(null);
+
+            try {
+              let base64;
+              let usedModel;
+              if (demoMode) {
+                await new Promise(r => setTimeout(r, 400)); // brief pause so the UX reads as "working"
+                base64 = makeDemoImage(promptText);
+                usedModel = 'DEMO (no AI call)';
+              } else if (proxyUrl) {
+                base64 = await callProxy(proxyUrl, classCode, activeModel, promptText);
+                usedModel = `${activeModel.id} (via class proxy)`;
+              } else if (activeModel.api === 'imagen') {
+                base64 = await callImagen(activeModel.id, apiKey, promptText);
+                usedModel = activeModel.id;
+              } else {
+                base64 = await callGemini(activeModel.id, apiKey, promptText);
+                usedModel = activeModel.id;
+              }
+
+              const newRun = {
+                imageBase64: base64,
+                timestamp: new Date().toISOString(),
+                promptText: promptText,
+                selectedColumns: [...selectedColumns],
+                model: usedModel,
+                context: collectionContext.trim()
+              };
+              const prevRunCount = normalizeRecord(sessionData[currentIndex]).runs.length;
+              setGeneratedImage(base64);
+              setActiveRunIndex(prevRunCount); // the new run lands at the end
+              setSessionData(prev => {
+                const cur = normalizeRecord(prev[currentIndex]);
+                return { ...prev, [currentIndex]: { auditNotes: cur.auditNotes, runs: [...cur.runs, newRun] } };
+              });
+            } catch (err) {
+              console.error(err);
+              setError(`Failed to generate image: ${err.message}`);
+            } finally {
+              setIsGenerating(false);
+            }
+          };
+
+          const escapeCSV = (str) => {
+            if (str === null || str === undefined) return '""';
+            const stringified = String(str);
+            if (stringified.includes(',') || stringified.includes('"') || stringified.includes('\n')) {
+              return `"${stringified.replace(/"/g, '""')}"`;
+            }
+            return stringified;
+          };
+
+          const handleExportSession = async () => {
+            saveCurrentToSession();
+            const auditedIndices = Object.keys(sessionData).map(Number).sort((a, b) => a - b);
+
+            if (auditedIndices.length === 0) {
+              alert("No audits completed yet! Generate an image or write notes to begin.");
+              return;
+            }
+
+            const zip = new JSZip();
+            const imgFolder = zip.folder("images");
+
+            const allUsedColsSet = new Set();
+            auditedIndices.forEach(idx => {
+              normalizeRecord(sessionData[idx]).runs.forEach(run => {
+                (run.selectedColumns || []).forEach(c => allUsedColsSet.add(c));
+              });
+            });
+            const dynamicHeaders = Array.from(allUsedColsSet);
+
+            const csvHeaders = [
+              "Original_Row_Index", "Run", "File", "AI_Model_Version", "Audit_Timestamp",
+              "Collection_Context", "Audit_Prompt", "Audit_Notes", ...dynamicHeaders.map(h => `Original_${h}`)
+            ];
+
+            let csvRows = [csvHeaders.join(",")];
+            const records = [];
+
+            auditedIndices.forEach(idx => {
+              const rec = normalizeRecord(sessionData[idx]);
+              const sourceRow = csvData[idx] || {};
+              const runRecords = [];
+
+              if (rec.runs.length === 0) {
+                // notes-only record (no image generated) — still emit a row
+                const rowData = [idx, "", "", "", "", "", "", rec.auditNotes || ""];
+                dynamicHeaders.forEach(col => rowData.push(sourceRow[col] || ""));
+                csvRows.push(rowData.map(escapeCSV).join(","));
+              } else {
+                rec.runs.forEach((run, n) => {
+                  let fileRef = "";
+                  if (run.imageBase64) {
+                    const fn = `audit_item_${String(idx).padStart(4, '0')}_run${n + 1}.png`;
+                    imgFolder.file(fn, run.imageBase64.replace(/^data:image\/\w+;base64,/, ""), { base64: true });
+                    fileRef = `images/${fn}`;
+                  }
+                  const rowData = [
+                    idx, n + 1, fileRef,
+                    run.model || "", run.timestamp || "", run.context || "", run.promptText || "", rec.auditNotes || ""
+                  ];
+                  dynamicHeaders.forEach(col => rowData.push(sourceRow[col] || ""));
+                  csvRows.push(rowData.map(escapeCSV).join(","));
+                  runRecords.push({
+                    run: n + 1, file: fileRef, timestamp: run.timestamp || "", context: run.context || "",
+                    promptText: run.promptText || "", selectedColumns: run.selectedColumns || [], model: run.model || ""
+                  });
+                });
+              }
+
+              records.push({ index: idx, auditNotes: rec.auditNotes || "", runs: runRecords });
+            });
+
+            zip.file("audit_results.csv", csvRows.join("\n"));
+
+            // Machine-readable session for re-import (fully resumable).
+            zip.file("session.json", JSON.stringify({
+              exportedAt: new Date().toISOString(),
+              datasetName, columns, selectedColumns, collectionContext,
+              rows: csvData,
+              records
+            }, null, 2));
+
+            const content = await zip.generateAsync({ type: "blob" });
+            const url = window.URL.createObjectURL(content);
+            const link = document.createElement('a');
+            link.href = url;
+            // Name includes the source CSV + a full date+time stamp, so exports are
+            // traceable to their dataset and never overwrite each other.
+            const baseName = (datasetName || 'dataset').replace(/\.csv$/i, '').replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '') || 'dataset';
+            const stamp = new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+            link.download = `Metadata_Audit_${baseName}_${stamp}.zip`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(url);
+          };
+
+          const handleImportSession = async (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+            try {
+              const zip = await JSZip.loadAsync(file);
+              const jsonFile = zip.file("session.json");
+              if (!jsonFile) throw new Error("No session.json found — is this a session ZIP exported by this tool?");
+              const meta = JSON.parse(await jsonFile.async("string"));
+
+              const loadImg = async (fileRef) => {
+                if (!fileRef) return null;
+                const f = zip.file(fileRef);
+                if (!f) return null;
+                const b64 = await f.async("base64");
+                return `data:image/png;base64,${b64}`;
+              };
+
+              const newSession = {};
+              for (const rec of (meta.records || [])) {
+                const runs = [];
+                if (Array.isArray(rec.runs)) {
+                  for (const r of rec.runs) {
+                    runs.push({
+                      imageBase64: await loadImg(r.file),
+                      timestamp: r.timestamp || '', promptText: r.promptText || '',
+                      selectedColumns: r.selectedColumns || [], model: r.model || '', context: r.context || ''
+                    });
+                  }
+                } else if (rec.file || rec.imageBase64) {
+                  // older single-image export format
+                  runs.push({
+                    imageBase64: await loadImg(rec.file),
+                    timestamp: rec.timestamp || '', promptText: rec.promptText || '',
+                    selectedColumns: rec.selectedColumns || [], model: rec.model || '', context: rec.context || ''
+                  });
+                }
+                newSession[rec.index] = { auditNotes: rec.auditNotes || '', runs };
+              }
+
+              const rows = meta.rows || [];
+              const cols = meta.columns || (rows[0] ? Object.keys(rows[0]) : []);
+              setColumns(cols);
+              setCsvData(rows);
+              setDatasetName(meta.datasetName || 'imported session');
+              setCollectionContext(meta.collectionContext || '');
+              setSelectedColumns(meta.selectedColumns && meta.selectedColumns.length ? meta.selectedColumns : cols.slice(0, Math.min(4, cols.length)));
+              setSessionData(newSession);
+              setDatasetKey(rows.length ? fingerprint(cols, rows) : 'imported');
+              setCurrentIndex(0);
+              const first = normalizeRecord(newSession[0]);
+              const lastRun = first.runs.length ? first.runs[first.runs.length - 1] : null;
+              setActiveRunIndex(first.runs.length ? first.runs.length - 1 : 0);
+              setGeneratedImage(lastRun ? (lastRun.imageBase64 || null) : null);
+              setAuditNotes(first.auditNotes);
+              setError(null);
+            } catch (err) {
+              setError(`Could not import session: ${err.message}`);
+            } finally {
+              event.target.value = '';
+            }
+          };
+
+          const filteredColumns = useMemo(() => {
+            return columns.filter(col => col.toLowerCase().includes(columnSearch.toLowerCase()));
+          }, [columns, columnSearch]);
+
+          const selectedRow = currentIndex >= 0 ? csvData[currentIndex] : null;
+          const promptText = buildPrompt();
+          const itemsAuditedCount = Object.keys(sessionData).length;
+          const totalRuns = Object.values(sessionData).reduce((s, rec) => s + normalizeRecord(rec).runs.length, 0);
+
+          return (
+            <div className="p-6 md:p-12">
+              <div className="max-w-6xl mx-auto space-y-8">
+
+                <header className="border-b border-slate-200 pb-6 flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+                  <div>
+                    <h1 className="text-3xl font-bold text-slate-800 flex items-center gap-3">
+                      <IconImage className="text-indigo-600" />
+                      Metadata Audit Simulator
+                    </h1>
+                    <p className="text-slate-500 mt-2 text-lg">
+                      Session Mode: audit sequentially and export a ZIP package for archiving.
+                    </p>
+                    <p className="text-slate-400 mt-1 text-sm">
+                      Created by Yael Netzer · built with Google Gemini &amp; Claude (Anthropic)
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2 shrink-0">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-lg px-3 py-2">
+                        <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Model</span>
+                        <select
+                          value={modelId}
+                          onChange={(e) => setModelId(e.target.value)}
+                          className="bg-white text-sm focus:outline-none text-slate-700"
+                        >
+                          <optgroup label="Built-in">
+                            {MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                          </optgroup>
+                          {discovered.length > 0 && (
+                            <optgroup label="Detected on your key">
+                              {discovered.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                            </optgroup>
+                          )}
+                          <option value={CUSTOM}>Custom model…</option>
+                        </select>
+                        <button
+                          onClick={handleDetectModels}
+                          disabled={detecting || demoMode || !apiKey}
+                          title="List the image models your API key can actually use"
+                          className="text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:text-slate-300 border-l border-slate-200 pl-2"
+                        >
+                          {detecting ? 'Detecting…' : 'Detect'}
+                        </button>
+                      </div>
+
+                      <label className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg border cursor-pointer transition-colors ${demoMode ? 'bg-amber-100 border-amber-300 text-amber-800' : 'bg-white border-slate-200 text-slate-600'}`}>
+                        <input type="checkbox" checked={demoMode} onChange={(e) => setDemoMode(e.target.checked)} className="rounded border-slate-300" />
+                        Demo mode (no API)
+                      </label>
+
+                    </div>
+
+                    <div className={`flex flex-wrap items-center gap-3 ${demoMode ? 'opacity-50' : ''}`}>
+                      <div className="flex items-center gap-2 bg-emerald-50 p-2 rounded-lg border border-emerald-100">
+                        <span className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">Class</span>
+                        <input
+                          type="text"
+                          placeholder="Proxy URL (students paste this)"
+                          value={proxyUrl}
+                          disabled={demoMode}
+                          onChange={(e) => setProxyUrl(e.target.value.trim())}
+                          className="bg-white border border-emerald-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-64 disabled:bg-slate-100"
+                        />
+                        <input
+                          type="text"
+                          placeholder="class code"
+                          value={classCode}
+                          disabled={demoMode}
+                          onChange={(e) => setClassCode(e.target.value.trim())}
+                          className="bg-white border border-emerald-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 w-28 disabled:bg-slate-100"
+                        />
+                      </div>
+
+                      <div className={`flex items-center gap-2 bg-indigo-50 p-2 rounded-lg border border-indigo-100 ${proxyUrl ? 'opacity-50' : ''}`}>
+                        <IconKey className="text-indigo-500" />
+                        <input
+                          type="password"
+                          placeholder="API key (instructor / optional)"
+                          value={apiKey}
+                          disabled={demoMode || !!proxyUrl}
+                          onChange={(e) => setApiKey(e.target.value)}
+                          className="bg-white border border-indigo-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 w-56 disabled:bg-slate-100"
+                        />
+                      </div>
+                    </div>
+
+                    {modelId === CUSTOM && (
+                      <div className="flex flex-wrap items-center gap-2 justify-end">
+                        <input
+                          type="text"
+                          placeholder="custom-model-id"
+                          value={customModelId}
+                          onChange={(e) => setCustomModelId(e.target.value)}
+                          className="bg-white border border-slate-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 w-48"
+                        />
+                        <select value={customApiType} onChange={(e) => setCustomApiType(e.target.value)} className="bg-white border border-slate-200 rounded px-2 py-1.5 text-sm focus:outline-none text-slate-700">
+                          <option value="imagen">Imagen API (:predict)</option>
+                          <option value="gemini">Gemini API (:generateContent)</option>
+                        </select>
+                      </div>
+                    )}
+
+                    <p className="text-xs text-slate-400 text-right">
+                      {demoMode
+                        ? 'Demo mode: generates a local placeholder — no key needed, no data sent.'
+                        : proxyUrl
+                          ? `Using class proxy — no personal key needed. Model: ${activeModel.label || activeModel.id}.`
+                          : `${activeModel.label || activeModel.id || 'No model'} — ${activeModel.tier}. Tiers change; check Google's current pricing.`}
+                    </p>
+                  </div>
+                </header>
+
+                <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-6">
+                  <div className="flex-1">
+                    <h2 className="text-lg font-semibold mb-2 flex items-center gap-2">
+                      <span className="bg-indigo-100 text-indigo-700 w-6 h-6 rounded-full flex items-center justify-center text-sm">1</span>
+                      Load Dataset
+                    </h2>
+
+                    <input type="file" accept=".csv" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+                    <input type="file" accept=".zip" ref={importInputRef} onChange={handleImportSession} className="hidden" />
+                    <div className="flex flex-wrap gap-3 items-center">
+                      <button
+                        onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                        className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                      >
+                        <IconUpload /> Upload CSV Data
+                      </button>
+                      <button
+                        onClick={() => importInputRef.current && importInputRef.current.click()}
+                        className="bg-white hover:bg-slate-100 text-slate-600 border border-slate-300 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+                      >
+                        <IconArchive /> Import Session (ZIP)
+                      </button>
+
+                      {csvData.length > 0 && (
+                        <div className="flex items-center gap-2 text-emerald-600 text-sm font-medium bg-emerald-50 px-3 py-1 rounded-full border border-emerald-100">
+                          <IconCheck /> {csvData.length} rows loaded
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400 mt-3">Your CSV is parsed locally in the browser and is never uploaded anywhere.</p>
+                  </div>
+
+                  {csvData.length > 0 && (
+                    <div className="flex-1 border-t md:border-t-0 md:border-l border-slate-200 pt-6 md:pt-0 md:pl-6">
+                      <h2 className="text-lg font-semibold mb-2 flex items-center gap-2">
+                        <span className="bg-indigo-100 text-indigo-700 w-6 h-6 rounded-full flex items-center justify-center text-sm">2</span>
+                        Session Status
+                      </h2>
+                      <div className="flex items-center justify-between">
+                        <p className="text-slate-600 text-sm">
+                          <strong>{itemsAuditedCount}</strong> items · <strong>{totalRuns}</strong> generations.
+                          {lastSaved && <span className="text-slate-400"> · autosaved {lastSaved.toLocaleTimeString()}</span>}
+                        </p>
+                        <button
+                          onClick={handleExportSession}
+                          disabled={itemsAuditedCount === 0}
+                          className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 shadow-sm"
+                        >
+                          <IconArchive /> Export Session (ZIP)
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-400 mt-2">Sessions autosave in this browser. Export the ZIP to archive or move to another machine.</p>
+                    </div>
+                  )}
+                </div>
+
+                {error && (
+                  <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded shadow-sm">
+                    {error}
+                  </div>
+                )}
+
+                {selectedRow && (
+                  <div className="grid lg:grid-cols-2 gap-8 relative">
+                    <div className="lg:col-span-2 bg-indigo-900 text-white p-4 rounded-xl shadow-md sticky top-4 z-20 space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-indigo-200 text-xs uppercase tracking-wider font-bold">Find</span>
+                        <select
+                          value={filterColumn}
+                          onChange={(e) => setFilterColumn(e.target.value)}
+                          className="bg-indigo-800 text-white text-sm rounded px-2 py-1.5 focus:outline-none border border-indigo-700 max-w-[10rem]"
+                        >
+                          <option value="">Any column</option>
+                          {columns.map(c => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                        <input
+                          type="text"
+                          value={filterText}
+                          onChange={(e) => setFilterText(e.target.value)}
+                          placeholder={filterColumn ? `Filter by ${filterColumn}… (e.g. IMAGE)` : 'Search any column…'}
+                          className="flex-1 min-w-[140px] bg-indigo-800 text-white placeholder-indigo-300 text-sm rounded px-3 py-1.5 focus:outline-none border border-indigo-700"
+                        />
+                        {filterText && (
+                          <button onClick={() => setFilterText('')} className="text-indigo-200 hover:text-white text-sm underline">clear</button>
+                        )}
+                        <span className="text-indigo-200 text-xs whitespace-nowrap">{filteredIndices.length} match{filteredIndices.length === 1 ? '' : 'es'}</span>
+                      </div>
+
+                      <div className="flex items-center justify-between">
+                        <button
+                          onClick={() => handleNavigate(-1)}
+                          disabled={isGenerating || filteredIndices.indexOf(currentIndex) <= 0}
+                          className="flex items-center gap-2 hover:bg-indigo-800 disabled:opacity-50 px-3 py-1.5 rounded transition-colors text-sm font-medium"
+                        >
+                          <IconChevronLeft /> Previous
+                        </button>
+
+                        <div className="flex items-center gap-4">
+                          <div className="text-center">
+                            <span className="text-indigo-200 text-xs uppercase tracking-wider font-bold">Record</span>
+                            <div className="text-lg font-mono">
+                              {filteredIndices.length ? filteredIndices.indexOf(currentIndex) + 1 : 0} / {filteredIndices.length}
+                              <span className="text-indigo-300 text-xs"> (row {currentIndex + 1})</span>
+                            </div>
+                          </div>
+                          <button
+                            onClick={handleRandom}
+                            disabled={isGenerating || filteredIndices.length === 0}
+                            title="Jump to a random matching record"
+                            className="flex items-center gap-2 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-50 px-3 py-1.5 rounded transition-colors text-sm font-medium"
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="M4 4l5 5"/></svg>
+                            Random
+                          </button>
+                        </div>
+
+                        <button
+                          onClick={() => handleNavigate(1)}
+                          disabled={isGenerating || filteredIndices.indexOf(currentIndex) < 0 || filteredIndices.indexOf(currentIndex) >= filteredIndices.length - 1}
+                          className="flex items-center gap-2 hover:bg-indigo-800 disabled:opacity-50 px-3 py-1.5 rounded transition-colors text-sm font-medium"
+                        >
+                          Next <IconChevronRight />
+                        </button>
+                      </div>
+
+                      {filteredIndices.length === 0 && (
+                        <p className="text-indigo-200 text-xs text-center">No records match — clear the filter to see all.</p>
+                      )}
+                    </div>
+
+                    <div className="space-y-6">
+                      <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4"><IconSettings /> Configure Prompt Schema</h3>
+                        <div className="relative mb-3">
+                          <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400"><IconSearch /></div>
+                          <input type="text" placeholder="Search columns..." value={columnSearch} onChange={(e) => setColumnSearch(e.target.value)} className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                        </div>
+                        <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 max-h-40 overflow-y-auto">
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {filteredColumns.map(col => (
+                              <label key={col} className="flex items-start gap-2 cursor-pointer p-1.5 rounded transition-colors hover:bg-slate-100">
+                                <input type="checkbox" checked={selectedColumns.includes(col)} onChange={() => toggleColumn(col)} className="mt-1 rounded border-slate-300" />
+                                <span className={`text-sm break-all ${selectedColumns.includes(col) ? 'text-slate-800 font-medium' : 'text-slate-500'}`}>{col}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4"><IconFileText /> Included Metadata</h3>
+                        <div className="bg-slate-50 p-4 rounded border border-slate-200 overflow-auto max-h-48 text-sm mb-4">
+                          <table className="w-full text-left">
+                            <tbody>
+                              {selectedColumns.map(key => (
+                                <tr key={key} className="border-b border-slate-200 last:border-0">
+                                  <td className="py-2 font-semibold text-slate-600 break-all pr-4 align-top w-1/3">{key}</td>
+                                  <td className="py-2 text-slate-800 break-words">{selectedRow[key] || <span className="text-slate-400 italic">Empty/NULL</span>}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <button onClick={() => setShowFullData(!showFullData)} className="flex items-center gap-2 text-sm font-medium text-indigo-600 hover:text-indigo-800">
+                          <IconDatabase /> {showFullData ? 'Hide Full Record' : 'View Full Original Record'}
+                          {showFullData ? <IconChevronUp /> : <IconChevronDown />}
+                        </button>
+                        {showFullData && (
+                          <div className="mt-4 bg-slate-900 p-4 rounded border border-slate-800 overflow-auto max-h-64 text-xs text-slate-300 font-mono shadow-inner">
+                            <table className="w-full text-left border-collapse">
+                              <tbody>
+                                {Object.entries(selectedRow).map(([key, value]) => (
+                                  <tr key={key} className="border-b border-slate-800/50 last:border-0 hover:bg-slate-800">
+                                    <td className="py-2 pr-4 font-semibold text-indigo-300 align-top break-all w-1/3">{key}</td>
+                                    <td className="py-2 break-all">{value || <span className="text-slate-500 italic">NULL</span>}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
+                        <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-2">
+                          <IconFileText /> Collection Context <span className="text-xs font-normal text-slate-400">(optional)</span>
+                        </h3>
+                        <p className="text-slate-500 text-sm mb-3">
+                          Background about the whole collection, prepended to every prompt. Leave empty for the pure zero-shot condition; fill it to show how human-supplied context changes what the AI produces.
+                        </p>
+                        <textarea
+                          value={collectionContext}
+                          onChange={(e) => setCollectionContext(e.target.value)}
+                          placeholder="e.g. This is a collection of late-19th-century architectural photographs from German municipal archives."
+                          className="w-full bg-slate-50 border border-slate-200 rounded-lg p-3 h-24 focus:ring-2 focus:ring-indigo-500 focus:outline-none text-slate-700 text-sm"
+                        />
+                        {collectionContext.trim() && (
+                          <p className="text-xs text-indigo-600 mt-2">Context is active — it's added to every generation and recorded in the export.</p>
+                        )}
+                      </div>
+
+                      <div className="bg-slate-800 p-6 rounded-xl shadow-sm text-slate-100">
+                        <h3 className="font-bold text-slate-200 mb-4 flex items-center gap-2"><IconChevronRight /> Zero-Shot Synthesis String</h3>
+                        <div className="bg-slate-900 p-4 rounded border border-slate-700 font-mono text-sm text-emerald-400 break-words max-h-40 overflow-auto">
+                          {promptText || <span className="text-slate-600">Empty prompt string...</span>}
+                        </div>
+                        <button onClick={handleGenerate} disabled={isGenerating || selectedColumns.length === 0} className="w-full mt-6 bg-indigo-500 hover:bg-indigo-600 disabled:bg-slate-600 text-white px-4 py-3 rounded-lg font-medium transition-colors flex items-center justify-center gap-2">
+                          {isGenerating ? <span className="animate-pulse">Generating Simulation...</span> : (demoMode ? "Generate (Demo — no AI)" : "Generate Audit Image")}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-6">
+                      <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[400px] flex flex-col">
+                        <h3 className="font-bold text-slate-800 mb-4">Generated Output</h3>
+                        <div className="flex-1 bg-slate-100 rounded-lg border-2 border-dashed border-slate-300 flex items-center justify-center overflow-hidden relative min-h-[300px]">
+                          {isGenerating && (
+                            <div className="absolute inset-0 bg-slate-100/90 flex flex-col items-center justify-center z-10 backdrop-blur-sm">
+                              <div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
+                            </div>
+                          )}
+                          {generatedImage && !isGenerating && (
+                            <img src={generatedImage} alt="AI Generated Interpretation" className="w-full h-full object-contain" />
+                          )}
+                          {!generatedImage && !isGenerating && (
+                            <div className="text-slate-400 flex flex-col items-center text-center p-6"><IconImage size={48} className="mb-2 opacity-50" /><p>Run generation to view AI interpretation.</p></div>
+                          )}
+                        </div>
+                        {(() => {
+                          const runs = normalizeRecord(sessionData[currentIndex]).runs;
+                          if (runs.length === 0) return null;
+                          const run = runs[activeRunIndex] || runs[runs.length - 1];
+                          return (
+                            <div className="mt-4">
+                              <div className="flex items-center justify-between text-xs text-slate-500 mb-2">
+                                <span className="font-semibold">Run {activeRunIndex + 1} of {runs.length}{run && run.model ? ` · ${run.model}` : ''}</span>
+                                {run && run.timestamp && <span className="font-mono">{new Date(run.timestamp).toLocaleString()}</span>}
+                              </div>
+                              {runs.length > 1 && (
+                                <div className="flex gap-2 overflow-x-auto pb-1">
+                                  {runs.map((r, i) => (
+                                    <button
+                                      key={i}
+                                      onClick={() => { setActiveRunIndex(i); setGeneratedImage(r.imageBase64 || null); }}
+                                      title={`Run ${i + 1}`}
+                                      className={`relative shrink-0 w-16 h-16 rounded border-2 overflow-hidden transition-colors ${i === activeRunIndex ? 'border-indigo-500' : 'border-slate-200 hover:border-slate-400'}`}
+                                    >
+                                      {r.imageBase64
+                                        ? <img src={r.imageBase64} alt={`Run ${i + 1}`} className="w-full h-full object-cover" />
+                                        : <span className="text-[10px] text-slate-400 flex items-center justify-center h-full">no img</span>}
+                                      <span className="absolute bottom-0 right-0 bg-slate-900/70 text-white text-[10px] px-1 rounded-tl">{i + 1}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              <p className="text-[11px] text-slate-400 mt-1">Each click of Generate adds a new run — compare how the same metadata yields different images.</p>
+                            </div>
+                          );
+                        })()}
+                      </div>
+
+                      <div className="bg-amber-50 p-6 rounded-xl shadow-sm border border-amber-200 flex flex-col">
+                        <h3 className="font-bold text-amber-900 mb-2 flex items-center gap-2"><IconAlert /> Student Audit Log</h3>
+                        <p className="text-sm text-amber-700 mb-4">What assumptions did the AI make to fill in the missing metadata gaps?</p>
+                        <textarea value={auditNotes} onChange={handleNotesChange} placeholder="Example: Hallucinated material..." className="w-full bg-white border border-amber-300 rounded-lg p-4 h-48 focus:ring-2 focus:ring-amber-500 focus:outline-none text-slate-700 text-sm shadow-inner" />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
