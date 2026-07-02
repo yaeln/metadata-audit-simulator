@@ -248,6 +248,7 @@
           const [auditNotes, setAuditNotes] = useState('');
 
           const [error, setError] = useState(null);
+          const [notice, setNotice] = useState(null);
           const [showFullData, setShowFullData] = useState(false);
           const fileInputRef = useRef(null);
           const importInputRef = useRef(null);
@@ -294,7 +295,17 @@
           useEffect(() => { try { localStorage.setItem('audit_proxy_url', proxyUrl); } catch (e) {} }, [proxyUrl]);
           useEffect(() => { try { localStorage.setItem('audit_class_code', classCode); } catch (e) {} }, [classCode]);
 
-          const parseCSV = (text) => {
+          // Pick a delimiter: .tsv/.tab -> tab; otherwise sniff the first line
+          // (whichever of tab/comma is more frequent wins).
+          const detectDelimiter = (fileName, text) => {
+            if (/\.(tsv|tab)$/i.test(fileName)) return '\t';
+            const firstLine = (text.split(/\r?\n/, 1)[0]) || '';
+            const tabs = (firstLine.match(/\t/g) || []).length;
+            const commas = (firstLine.match(/,/g) || []).length;
+            return tabs > commas ? '\t' : ',';
+          };
+
+          const parseCSV = (text, delimiter = ',') => {
             const rows = [];
             let currentRow = [];
             let currentCell = '';
@@ -306,7 +317,7 @@
                 currentCell += '"'; i++;
               } else if (char === '"') {
                 inQuotes = !inQuotes;
-              } else if (char === ',' && !inQuotes) {
+              } else if (char === delimiter && !inQuotes) {
                 currentRow.push(currentCell); currentCell = '';
               } else if ((char === '\n' || char === '\r') && !inQuotes) {
                 if (char === '\r' && text[i + 1] === '\n') i++;
@@ -341,11 +352,20 @@
             const reader = new FileReader();
             reader.onload = (e) => {
               try {
-                const { headers, data } = parseCSV(e.target.result);
+                const delimiter = detectDelimiter(file.name, e.target.result);
+                const { headers, data } = parseCSV(e.target.result, delimiter);
                 setColumns(headers);
                 setCsvData(data);
                 setDatasetName(file.name);
                 setError(null);
+
+                // Soft warning for very large files (the whole table is held in
+                // memory so faceting / filtering / random access can work).
+                const bigRows = data.length >= 3000;
+                const bigBytes = file.size >= 8 * 1024 * 1024;
+                setNotice(bigRows || bigBytes
+                  ? `Large dataset loaded: ${data.length.toLocaleString()} rows (${(file.size / 1048576).toFixed(1)} MB). The whole file is kept in memory, so a very large file can slow the browser. For teaching, a curated subset of ~50–150 rows works best.`
+                  : null);
 
                 const defaultCols = headers.filter(h => ['title', 'type', 'country', 'dcDescription', 'year'].includes(h.toLowerCase()));
                 setSelectedColumns(defaultCols.length > 0 ? defaultCols : headers.slice(0, Math.min(4, headers.length)));
@@ -378,7 +398,7 @@
                   }
                 }).catch(() => {});
               } catch (err) {
-                setError("Error parsing CSV. Please ensure it's a valid comma-separated file.");
+                setError("Error parsing the file. Please ensure it's a valid CSV or TSV (comma- or tab-separated).");
               }
             };
             reader.readAsText(file);
@@ -824,14 +844,14 @@
                       Load Dataset
                     </h2>
 
-                    <input type="file" accept=".csv" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
+                    <input type="file" accept=".csv,.tsv,.tab" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
                     <input type="file" accept=".zip" ref={importInputRef} onChange={handleImportSession} className="hidden" />
                     <div className="flex flex-wrap gap-3 items-center">
                       <button
                         onClick={() => fileInputRef.current && fileInputRef.current.click()}
                         className="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
                       >
-                        <IconUpload /> Upload CSV Data
+                        <IconUpload /> Upload CSV / TSV Data
                       </button>
                       <button
                         onClick={() => importInputRef.current && importInputRef.current.click()}
@@ -846,7 +866,7 @@
                         </div>
                       )}
                     </div>
-                    <p className="text-xs text-slate-400 mt-3">Your CSV is parsed locally in the browser and is never uploaded anywhere.</p>
+                    <p className="text-xs text-slate-400 mt-3">Accepts CSV or TSV (delimiter auto-detected). Your file is parsed locally in the browser and is never uploaded anywhere. Very large files are held entirely in memory — a curated subset (~50–150 rows) is best for teaching.</p>
                   </div>
 
                   {csvData.length > 0 && (
@@ -876,6 +896,13 @@
                 {error && (
                   <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded shadow-sm">
                     {error}
+                  </div>
+                )}
+
+                {notice && (
+                  <div className="bg-amber-50 border-l-4 border-amber-400 text-amber-800 p-4 rounded shadow-sm flex items-start justify-between gap-4">
+                    <span className="text-sm">{notice}</span>
+                    <button onClick={() => setNotice(null)} className="text-amber-500 hover:text-amber-700 text-sm font-medium shrink-0">dismiss</button>
                   </div>
                 )}
 
