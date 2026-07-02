@@ -12,7 +12,7 @@ authors:
   - family-names: Netzer
     given-names: Yael
     affiliation: "The Hebrew University of Jerusalem"
-    # orcid: "https://orcid.org/0000-0000-0000-0000"   # add your ORCID if you have one
+    orcid: "https://orcid.org/0009-0002-1083-3770"
 license: MIT
 repository-code: "https://github.com/yaeln/metadata-audit-simulator"
 url: "https://audit.yaeln.org"
