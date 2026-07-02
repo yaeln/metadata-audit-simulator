@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Metadata Audit Simulator"
+abstract: >-
+  A single-file, in-browser digital-humanities teaching tool for auditing how
+  gaps and inconsistencies in cultural-heritage metadata drive AI
+  image-generation hallucination. Developed for the ESU 2026 Digital Archives
+  workshop. Initial prototype generated with Google Gemini; developed and
+  extended with Claude (Anthropic).
+type: software
+authors:
+  - family-names: Netzer
+    given-names: Yael
+    affiliation: "The Hebrew University of Jerusalem"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"   # add your ORCID if you have one
+license: MIT
+repository-code: "https://github.com/yaeln/metadata-audit-simulator"
+url: "https://audit.yaeln.org"
+keywords:
+  - digital humanities
+  - metadata
+  - cultural heritage
+  - distant reading
+  - generative AI
+  - teaching
+version: 1.0.0
+date-released: 2026-07-02

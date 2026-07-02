@@ -1,0 +1,22 @@
+{
+  "title": "Metadata Audit Simulator",
+  "upload_type": "software",
+  "description": "A single-file, in-browser digital-humanities teaching tool for auditing how gaps and inconsistencies in cultural-heritage metadata drive AI image-generation hallucination. Developed for the ESU 2026 Digital Archives workshop. Initial prototype generated with Google Gemini; developed and extended with Claude (Anthropic).",
+  "creators": [
+    {
+      "name": "Netzer, Yael",
+      "affiliation": "The Hebrew University of Jerusalem"
+    }
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "keywords": [
+    "digital humanities",
+    "metadata",
+    "cultural heritage",
+    "distant reading",
+    "generative AI",
+    "teaching"
+  ],
+  "notes": "Built with the assistance of Google Gemini (initial prototype) and Claude, Anthropic (development and extension)."
+}
