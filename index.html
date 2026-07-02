@@ -231,6 +231,7 @@
           const [filterColumn, setFilterColumn] = useState('');
           const [filterText, setFilterText] = useState('');
           const [collectionContext, setCollectionContext] = useState('');
+          const [omitEmpty, setOmitEmpty] = useState(false);
 
           const [csvData, setCsvData] = useState([]);
           const [columns, setColumns] = useState([]);
@@ -491,10 +492,15 @@
             setSelectedColumns(prev => prev.includes(col) ? prev.filter(c => c !== col) : [...prev, col]);
           };
 
+          const isEmptyValue = (v) => v === undefined || v === null || String(v).trim() === '' || String(v).trim().toUpperCase() === 'NULL';
+
           const buildPrompt = (rowIndex = currentIndex) => {
             const row = csvData[rowIndex];
             if (!row || selectedColumns.length === 0) return "";
-            const fields = selectedColumns.map(field => `${field.toUpperCase()}: ${row[field] ? row[field] : 'NULL'}`).join(' | ');
+            const fields = selectedColumns
+              .filter(field => !omitEmpty || !isEmptyValue(row[field]))
+              .map(field => `${field.toUpperCase()}: ${isEmptyValue(row[field]) ? 'NULL' : row[field]}`)
+              .join(' | ');
             const ctx = collectionContext.trim();
             return ctx ? `COLLECTION CONTEXT: ${ctx} | ${fields}` : fields;
           };
@@ -977,6 +983,10 @@
                     <div className="space-y-6">
                       <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
                         <h3 className="font-bold text-slate-800 flex items-center gap-2 mb-4"><IconSettings /> Configure Prompt Schema</h3>
+                        <label className="flex items-center gap-2 cursor-pointer mb-3 text-sm text-slate-600">
+                          <input type="checkbox" checked={omitEmpty} onChange={(e) => setOmitEmpty(e.target.checked)} className="rounded border-slate-300" />
+                          Omit empty / NULL fields from the prompt
+                        </label>
                         <div className="relative mb-3">
                           <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400"><IconSearch /></div>
                           <input type="text" placeholder="Search columns..." value={columnSearch} onChange={(e) => setColumnSearch(e.target.value)} className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
