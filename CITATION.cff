@@ -14,6 +14,11 @@ authors:
     affiliation: "The Hebrew University of Jerusalem"
     orcid: "https://orcid.org/0009-0002-1083-3770"
 license: MIT
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.21132215"
+    description: "Zenodo archive of this software"
+doi: "10.5281/zenodo.21132215"
 repository-code: "https://github.com/yaeln/metadata-audit-simulator"
 url: "https://audit.yaeln.org"
 keywords:

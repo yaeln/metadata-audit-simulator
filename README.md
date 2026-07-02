@@ -2,6 +2,8 @@
 
 **Created by Yael Netzer — built with Google Gemini & Claude (Anthropic).**
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21132215.svg)](https://doi.org/10.5281/zenodo.21132215)
+
 A single-file, in-browser teaching tool for exploring how the quality and
 completeness of cultural-heritage **metadata** shapes what an AI image model
 produces. Give a machine a catalogue record with gaps — a missing year, a vague
