@@ -624,6 +624,16 @@
             let csvRows = [csvHeaders.join(",")];
             const records = [];
 
+            // Stats + a documented list of refusal cases.
+            const modelStats = {};
+            const refusedList = [];
+            let genCount = 0;
+            const pickId = (row) => {
+              const keys = ['שם', 'name', 'Name', 'title', 'Title', 'dcterms:title', 'dc:title', 'id', 'ID'];
+              for (const k of keys) { if (row[k] && String(row[k]).trim()) return String(row[k]).trim(); }
+              return '';
+            };
+
             auditedIndices.forEach(idx => {
               const rec = normalizeRecord(sessionData[idx]);
               const sourceRow = csvData[idx] || {};
@@ -643,6 +653,15 @@
                     fileRef = `images/${fn}`;
                   }
                   const status = run.status || (run.imageBase64 ? 'ok' : 'refused');
+                  genCount++;
+                  const mk = run.model || 'unknown';
+                  modelStats[mk] = modelStats[mk] || { ok: 0, refused: 0 };
+                  if (status === 'refused') {
+                    modelStats[mk].refused++;
+                    refusedList.push({ idx, run: n + 1, model: mk, reason: run.refusalReason || '', prompt: run.promptText || '', id: pickId(sourceRow) });
+                  } else {
+                    modelStats[mk].ok++;
+                  }
                   const rowData = [
                     idx, n + 1, fileRef,
                     run.model || "", run.timestamp || "", run.context || "", run.promptText || "", rec.auditNotes || "",
@@ -662,6 +681,35 @@
             });
 
             zip.file("audit_results.csv", csvRows.join("\n"));
+
+            // --- Documentation of the refusal cases (human + machine readable) ---
+            const summaryLines = [
+              'METADATA AUDIT — SESSION SUMMARY',
+              `Dataset: ${datasetName || '(unnamed)'}`,
+              `Exported: ${new Date().toISOString()}`,
+              '',
+              `Records audited: ${auditedIndices.length}`,
+              `Total generations: ${genCount}`,
+              `Refusals (no image returned): ${refusedList.length}`,
+              '',
+              'By model:'
+            ];
+            Object.keys(modelStats).sort().forEach(m => {
+              summaryLines.push(`  ${m}: ok=${modelStats[m].ok}, refused=${modelStats[m].refused}`);
+            });
+            summaryLines.push('', `Refused cases (${refusedList.length}):`);
+            refusedList.forEach(r => {
+              summaryLines.push(`  row ${r.idx} · run ${r.run} · ${r.model}`);
+              if (r.id) summaryLines.push(`    ${r.id}`);
+              summaryLines.push(`    reason: ${r.reason || '(none given)'}`);
+            });
+            zip.file('summary.txt', summaryLines.join('\n'));
+
+            const refHeaders = ['Original_Row_Index', 'Run', 'AI_Model_Version', 'Identifier', 'Refusal_Reason', 'Audit_Prompt'];
+            const refRows = [refHeaders.join(',')].concat(
+              refusedList.map(r => [r.idx, r.run, r.model, r.id, r.reason, r.prompt].map(escapeCSV).join(','))
+            );
+            zip.file('refusals.csv', refRows.join('\n'));
 
             // Machine-readable session for re-import (fully resumable).
             zip.file("session.json", JSON.stringify({
