@@ -241,6 +241,9 @@
             if (/insufficient_quota|billing|exceeded your current quota/i.test(em)) {
               throw new Error(`OpenAI: no credits / billing not set up. Add a payment method + credits at platform.openai.com → Billing. ${em}`);
             }
+            if (/does not exist|do not have access|model_not_found/i.test(em)) {
+              throw new Error(`OpenAI: this model isn't available to your account/key yet. Usually one of: (1) no credit balance added (platform.openai.com → Billing → "Add to credit balance"); (2) gpt-image-1 needs one-time Organization Verification (Settings → Organization → General → Verify); (3) a restricted project key that excludes this model. ${em}`);
+            }
             if (res.status === 429) throw new Error(`OpenAI rate limit (429) — wait and retry. ${em}`);
             throw new Error(`OpenAI error (${res.status}). ${em}`);
           }
