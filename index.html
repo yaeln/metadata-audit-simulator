@@ -29,11 +29,13 @@
         // api: 'gemini'  -> POST :generateContent { contents:[...] }            -> candidates[0].content.parts[].inlineData.data
         // Tiers are approximate and change over time — students should check
         // Google's current pricing/availability for their own key.
+        // Model availability changes and varies by key/region — use the "Detect"
+        // button to list exactly what a given key supports. These are the two that
+        // are broadly current; older IDs (e.g. imagen-3.0-*, gemini-2.0-*-image)
+        // now 404 on many keys.
         const MODELS = [
-          { id: 'imagen-4.0-generate-001',                  label: 'Imagen 4 — highest quality',          api: 'imagen', tier: 'usually requires billing' },
-          { id: 'imagen-3.0-generate-002',                  label: 'Imagen 3',                             api: 'imagen', tier: 'usually requires billing' },
+          { id: 'imagen-4.0-generate-001',                  label: 'Imagen 4 — highest quality',            api: 'imagen', tier: 'usually requires billing' },
           { id: 'gemini-2.5-flash-image',                   label: 'Gemini 2.5 Flash Image ("Nano Banana")', api: 'gemini', tier: 'may require billing' },
-          { id: 'gemini-2.0-flash-preview-image-generation', label: 'Gemini 2.0 Flash (image generation)', api: 'gemini', tier: 'often available on free tier' },
         ];
         const CUSTOM = '__custom__';
 
@@ -165,8 +167,13 @@
           const data = await res.json().catch(() => ({}));
           if (!res.ok || data.error) throw apiError(res.status, data);
           const b64 = data.predictions && data.predictions[0] && data.predictions[0].bytesBase64Encoded;
-          if (!b64) throw new Error('The model returned no image.');
-          return `data:image/png;base64,${b64}`;
+          if (!b64) {
+            // HTTP 200 but no image = the model filtered/refused this record.
+            const p0 = (data.predictions && data.predictions[0]) || {};
+            const reason = p0.raiFilteredReason || p0.raiReason || 'No image returned — the model blocked/filtered this record (safety refusal).';
+            return { image: null, refusal: reason };
+          }
+          return { image: `data:image/png;base64,${b64}` };
         }
 
         async function callGemini(model, key, prompt) {
@@ -183,9 +190,16 @@
           const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
           const part = parts.find(p => (p.inlineData && p.inlineData.data) || (p.inline_data && p.inline_data.data));
           const inline = part && (part.inlineData || part.inline_data);
-          if (!inline || !inline.data) throw new Error('The model returned only text (or refused) — no image. Try an Imagen model or rephrase.');
+          if (!inline || !inline.data) {
+            const cand = (data.candidates && data.candidates[0]) || {};
+            const textOut = parts.map(p => p.text).filter(Boolean).join(' ').trim();
+            const reason = (cand.finishReason && cand.finishReason !== 'STOP')
+              ? `Blocked/refused (finishReason: ${cand.finishReason})`
+              : (textOut ? `Text-only response: ${textOut.slice(0, 300)}` : 'No image returned (likely refusal).');
+            return { image: null, refusal: reason };
+          }
           const mime = inline.mimeType || inline.mime_type || 'image/png';
-          return `data:${mime};base64,${inline.data}`;
+          return { image: `data:${mime};base64,${inline.data}` };
         }
 
         // Students route through the class proxy (no key in the browser).
@@ -197,8 +211,9 @@
           });
           const data = await res.json().catch(() => ({}));
           if (!res.ok || data.error) throw new Error(data.error || `Proxy error (${res.status}).`);
-          if (!data.image) throw new Error('The proxy returned no image.');
-          return data.image;
+          if (data.image) return { image: data.image };
+          // Newer proxy returns { refusal } on a safety block; older proxy errors above.
+          return { image: null, refusal: data.refusal || 'The proxy returned no image (refusal).' };
         }
 
         // --- Inline Icons ---
@@ -522,30 +537,36 @@
             setError(null);
 
             try {
-              let base64;
+              let result;
               let usedModel;
               if (demoMode) {
                 await new Promise(r => setTimeout(r, 400)); // brief pause so the UX reads as "working"
-                base64 = makeDemoImage(promptText);
+                result = { image: makeDemoImage(promptText) };
                 usedModel = 'DEMO (no AI call)';
               } else if (proxyUrl) {
-                base64 = await callProxy(proxyUrl, classCode, activeModel, promptText);
+                result = await callProxy(proxyUrl, classCode, activeModel, promptText);
                 usedModel = `${activeModel.id} (via class proxy)`;
               } else if (activeModel.api === 'imagen') {
-                base64 = await callImagen(activeModel.id, apiKey, promptText);
+                result = await callImagen(activeModel.id, apiKey, promptText);
                 usedModel = activeModel.id;
               } else {
-                base64 = await callGemini(activeModel.id, apiKey, promptText);
+                result = await callGemini(activeModel.id, apiKey, promptText);
                 usedModel = activeModel.id;
               }
 
+              const base64 = result.image || null;
+              const refused = !base64;
+
+              // Record the run either way — a refusal (no image) is a finding, not a lost result.
               const newRun = {
                 imageBase64: base64,
                 timestamp: new Date().toISOString(),
                 promptText: promptText,
                 selectedColumns: [...selectedColumns],
                 model: usedModel,
-                context: collectionContext.trim()
+                context: collectionContext.trim(),
+                status: refused ? 'refused' : 'ok',
+                refusalReason: refused ? (result.refusal || 'No image returned.') : ''
               };
               const prevRunCount = normalizeRecord(sessionData[currentIndex]).runs.length;
               setGeneratedImage(base64);
@@ -554,6 +575,9 @@
                 const cur = normalizeRecord(prev[currentIndex]);
                 return { ...prev, [currentIndex]: { auditNotes: cur.auditNotes, runs: [...cur.runs, newRun] } };
               });
+              setNotice(refused
+                ? `Recorded a REFUSAL for this record (no image returned)${newRun.refusalReason ? ': ' + newRun.refusalReason : ''}.`
+                : null);
             } catch (err) {
               console.error(err);
               setError(`Failed to generate image: ${err.message}`);
@@ -593,7 +617,8 @@
 
             const csvHeaders = [
               "Original_Row_Index", "Run", "File", "AI_Model_Version", "Audit_Timestamp",
-              "Collection_Context", "Audit_Prompt", "Audit_Notes", ...dynamicHeaders.map(h => `Original_${h}`)
+              "Collection_Context", "Audit_Prompt", "Audit_Notes", "Status", "Refusal_Reason",
+              ...dynamicHeaders.map(h => `Original_${h}`)
             ];
 
             let csvRows = [csvHeaders.join(",")];
@@ -606,7 +631,7 @@
 
               if (rec.runs.length === 0) {
                 // notes-only record (no image generated) — still emit a row
-                const rowData = [idx, "", "", "", "", "", "", rec.auditNotes || ""];
+                const rowData = [idx, "", "", "", "", "", "", rec.auditNotes || "", "", ""];
                 dynamicHeaders.forEach(col => rowData.push(sourceRow[col] || ""));
                 csvRows.push(rowData.map(escapeCSV).join(","));
               } else {
@@ -617,15 +642,18 @@
                     imgFolder.file(fn, run.imageBase64.replace(/^data:image\/\w+;base64,/, ""), { base64: true });
                     fileRef = `images/${fn}`;
                   }
+                  const status = run.status || (run.imageBase64 ? 'ok' : 'refused');
                   const rowData = [
                     idx, n + 1, fileRef,
-                    run.model || "", run.timestamp || "", run.context || "", run.promptText || "", rec.auditNotes || ""
+                    run.model || "", run.timestamp || "", run.context || "", run.promptText || "", rec.auditNotes || "",
+                    status, run.refusalReason || ""
                   ];
                   dynamicHeaders.forEach(col => rowData.push(sourceRow[col] || ""));
                   csvRows.push(rowData.map(escapeCSV).join(","));
                   runRecords.push({
                     run: n + 1, file: fileRef, timestamp: run.timestamp || "", context: run.context || "",
-                    promptText: run.promptText || "", selectedColumns: run.selectedColumns || [], model: run.model || ""
+                    promptText: run.promptText || "", selectedColumns: run.selectedColumns || [], model: run.model || "",
+                    status: status, refusalReason: run.refusalReason || ""
                   });
                 });
               }
@@ -683,7 +711,8 @@
                     runs.push({
                       imageBase64: await loadImg(r.file),
                       timestamp: r.timestamp || '', promptText: r.promptText || '',
-                      selectedColumns: r.selectedColumns || [], model: r.model || '', context: r.context || ''
+                      selectedColumns: r.selectedColumns || [], model: r.model || '', context: r.context || '',
+                      status: r.status || (r.file ? 'ok' : ''), refusalReason: r.refusalReason || ''
                     });
                   }
                 } else if (rec.file || rec.imageBase64) {
@@ -1092,6 +1121,11 @@
                                 <span className="font-semibold">Run {activeRunIndex + 1} of {runs.length}{run && run.model ? ` · ${run.model}` : ''}</span>
                                 {run && run.timestamp && <span className="font-mono">{new Date(run.timestamp).toLocaleString()}</span>}
                               </div>
+                              {run && run.status === 'refused' && (
+                                <div className="mb-2 text-xs bg-rose-50 border border-rose-200 text-rose-700 rounded px-2 py-1">
+                                  ⚠ Model refused / returned no image{run.refusalReason ? `: ${run.refusalReason}` : ''}
+                                </div>
+                              )}
                               {runs.length > 1 && (
                                 <div className="flex gap-2 overflow-x-auto pb-1">
                                   {runs.map((r, i) => (

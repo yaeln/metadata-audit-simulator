@@ -61,7 +61,10 @@ export default {
         const d = await r.json().catch(() => ({}));
         if (!r.ok || d.error) return json({ error: (d.error && d.error.message) || `Google error ${r.status}` }, r.status, cors);
         const b64 = d.predictions && d.predictions[0] && d.predictions[0].bytesBase64Encoded;
-        if (!b64) return json({ error: 'Google returned no image.' }, 502, cors);
+        if (!b64) {
+          const p0 = (d.predictions && d.predictions[0]) || {};
+          return json({ refusal: p0.raiFilteredReason || p0.raiReason || 'No image returned — model blocked/filtered this record (safety refusal).' }, 200, cors);
+        }
         image = `data:image/png;base64,${b64}`;
 
       } else {
@@ -78,7 +81,14 @@ export default {
         const parts = (d.candidates && d.candidates[0] && d.candidates[0].content && d.candidates[0].content.parts) || [];
         const part = parts.find(p => (p.inlineData && p.inlineData.data) || (p.inline_data && p.inline_data.data));
         const inline = part && (part.inlineData || part.inline_data);
-        if (!inline || !inline.data) return json({ error: 'Model returned no image (only text or a refusal).' }, 502, cors);
+        if (!inline || !inline.data) {
+          const cand = (d.candidates && d.candidates[0]) || {};
+          const textOut = parts.map(p => p.text).filter(Boolean).join(' ').trim();
+          const reason = (cand.finishReason && cand.finishReason !== 'STOP')
+            ? `Blocked/refused (finishReason: ${cand.finishReason})`
+            : (textOut ? `Text-only response: ${textOut.slice(0, 300)}` : 'No image returned (likely refusal).');
+          return json({ refusal: reason }, 200, cors);
+        }
         image = `data:${inline.mimeType || inline.mime_type || 'image/png'};base64,${inline.data}`;
       }
 
