@@ -34,8 +34,10 @@
         // are broadly current; older IDs (e.g. imagen-3.0-*, gemini-2.0-*-image)
         // now 404 on many keys.
         const MODELS = [
-          { id: 'imagen-4.0-generate-001',                  label: 'Imagen 4 — highest quality',            api: 'imagen', tier: 'usually requires billing' },
-          { id: 'gemini-2.5-flash-image',                   label: 'Gemini 2.5 Flash Image ("Nano Banana")', api: 'gemini', tier: 'may require billing' },
+          { id: 'imagen-4.0-generate-001',                  label: 'Imagen 4 — highest quality',            api: 'imagen', tier: 'Google — usually requires billing' },
+          { id: 'gemini-2.5-flash-image',                   label: 'Gemini 2.5 Flash Image ("Nano Banana")', api: 'gemini', tier: 'Google — may require billing' },
+          { id: 'gpt-image-1',                              label: 'OpenAI GPT-Image-1 (best at in-image text)', api: 'openai', tier: 'OpenAI key — requires OpenAI billing' },
+          { id: 'dall-e-3',                                 label: 'OpenAI DALL·E 3',                        api: 'openai', tier: 'OpenAI key — requires OpenAI billing' },
         ];
         const CUSTOM = '__custom__';
 
@@ -214,6 +216,40 @@
           }
           const mime = inline.mimeType || inline.mime_type || 'image/png';
           return { image: `data:${mime};base64,${inline.data}` };
+        }
+
+        async function callOpenAI(model, key, prompt) {
+          const body = { model, prompt, n: 1, size: '1024x1024' };
+          if (/^dall-e/i.test(model)) body.response_format = 'b64_json'; // gpt-image-1 returns b64 natively
+          let res;
+          try {
+            res = await fetch('https://api.openai.com/v1/images/generations', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+              body: JSON.stringify(body)
+            });
+          } catch (e) {
+            throw new Error('Could not reach OpenAI from the browser (possible CORS/network block). If this persists, we can route OpenAI through the class proxy.');
+          }
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) {
+            const em = (data.error && (data.error.message || data.error.code)) || `OpenAI error ${res.status}`;
+            // Content-policy rejections are refusals (a finding), not hard errors.
+            if (/safety|moderation|content[_\s-]?policy|rejected|not allowed|violat/i.test(em)) {
+              return { image: null, refusal: `OpenAI content policy: ${em}` };
+            }
+            if (res.status === 401) throw new Error(`OpenAI: invalid API key (401). ${em}`);
+            if (/insufficient_quota|billing|exceeded your current quota/i.test(em)) {
+              throw new Error(`OpenAI: no credits / billing not set up. Add a payment method + credits at platform.openai.com → Billing. ${em}`);
+            }
+            if (res.status === 429) throw new Error(`OpenAI rate limit (429) — wait and retry. ${em}`);
+            throw new Error(`OpenAI error (${res.status}). ${em}`);
+          }
+          const b64 = data.data && data.data[0] && data.data[0].b64_json;
+          if (b64) return { image: `data:image/png;base64,${b64}` };
+          const url = data.data && data.data[0] && data.data[0].url;
+          if (url) return { image: url };
+          return { image: null, refusal: 'OpenAI returned no image.' };
         }
 
         // Students route through the class proxy (no key in the browser).
@@ -569,6 +605,9 @@
               } else if (activeModel.api === 'imagen') {
                 result = await callImagen(activeModel.id, apiKey, promptText);
                 usedModel = activeModel.id;
+              } else if (activeModel.api === 'openai') {
+                result = await callOpenAI(activeModel.id, apiKey, promptText);
+                usedModel = activeModel.id;
               } else {
                 result = await callGemini(activeModel.id, apiKey, promptText);
                 usedModel = activeModel.id;
@@ -865,7 +904,7 @@
                         </select>
                         <button
                           onClick={handleDetectModels}
-                          disabled={detecting || demoMode || !apiKey}
+                          disabled={detecting || demoMode || !apiKey || activeModel.api === 'openai'}
                           title="List the image models your API key can actually use"
                           className="text-xs font-medium text-indigo-600 hover:text-indigo-800 disabled:text-slate-300 border-l border-slate-200 pl-2"
                         >
@@ -905,7 +944,7 @@
                         <IconKey className="text-indigo-500" />
                         <input
                           type="password"
-                          placeholder="API key (instructor / optional)"
+                          placeholder={activeModel.api === 'openai' ? 'OpenAI key (sk-…)' : 'API key (Google / instructor)'}
                           value={apiKey}
                           disabled={demoMode || !!proxyUrl}
                           onChange={(e) => setApiKey(e.target.value)}
