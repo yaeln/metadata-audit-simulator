@@ -220,7 +220,6 @@
 
         async function callOpenAI(model, key, prompt) {
           const body = { model, prompt, n: 1, size: '1024x1024' };
-          if (/^dall-e/i.test(model)) body.response_format = 'b64_json'; // gpt-image-1 returns b64 natively
           let res;
           try {
             res = await fetch('https://api.openai.com/v1/images/generations', {
@@ -248,7 +247,22 @@
           const b64 = data.data && data.data[0] && data.data[0].b64_json;
           if (b64) return { image: `data:image/png;base64,${b64}` };
           const url = data.data && data.data[0] && data.data[0].url;
-          if (url) return { image: url };
+          if (url) {
+            // DALL·E 3 returns a temporary URL; fetch + inline it so it persists and exports.
+            try {
+              const imgRes = await fetch(url);
+              const blob = await imgRes.blob();
+              const dataUrl = await new Promise((resolve, reject) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(fr.result);
+                fr.onerror = reject;
+                fr.readAsDataURL(blob);
+              });
+              return { image: dataUrl };
+            } catch (e) {
+              return { image: url }; // display-only fallback (URL expires ~1h, won't export)
+            }
+          }
           return { image: null, refusal: 'OpenAI returned no image.' };
         }
 
