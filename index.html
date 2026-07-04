@@ -164,7 +164,10 @@
             if (/limit:\s*0|free_tier/i.test(txt)) {
               return new Error(`Image generation isn't available on this key's FREE tier (quota is 0). To generate images you must enable billing on the Google account for this key — image models (Imagen + Gemini image) are paid-only. Until then, use Demo Mode.${msg}`);
             }
-            return new Error(`Rate limit reached (429). You're sending requests too fast — wait a few seconds and try again.${msg}`);
+            if (/per[_\s-]?day|requests?_per_day/i.test(txt)) {
+              return new Error(`Daily quota reached for this model. Google caps requests-per-day per tier (e.g. Imagen 4 ≈ 70/day on paid Tier 1). It resets at midnight US-Pacific time. Options: switch to another model (Gemini image has its own separate daily quota), request a higher quota in Google Cloud → IAM & Admin → Quotas, or continue tomorrow.${msg}`);
+            }
+            return new Error(`Rate limit reached (429) — too many requests in a short window. Wait a few seconds and retry.${msg}`);
           }
           return new Error(`API error (${status}).${msg}`);
         }
