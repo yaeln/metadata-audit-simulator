@@ -996,6 +996,41 @@
                   </div>
                 </header>
 
+                <details open className="group bg-white rounded-xl shadow-sm border border-slate-200 open:ring-1 open:ring-indigo-100">
+                  <summary className="cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden p-5 flex items-center justify-between gap-3">
+                    <span className="flex items-center gap-2 font-semibold text-slate-800">
+                      <IconFileText /> About this tool — objective · input · output
+                    </span>
+                    <span className="text-slate-400 transition-transform group-open:rotate-180"><IconChevronDown /></span>
+                  </summary>
+                  <div className="px-5 pb-5 grid md:grid-cols-3 gap-5 text-sm">
+                    <div className="border-l-2 border-indigo-200 pl-3">
+                      <h3 className="font-semibold text-slate-800 mb-1">1 · Objective</h3>
+                      <p className="text-slate-600 leading-relaxed">
+                        Audit how the completeness of catalogue metadata shapes what an AI "sees." You expose selected
+                        metadata fields to an AI image model and watch what it <em>invents</em> to fill the gaps — revealing
+                        what your records do and don't say.
+                      </p>
+                    </div>
+                    <div className="border-l-2 border-indigo-200 pl-3">
+                      <h3 className="font-semibold text-slate-800 mb-1">2 · Input</h3>
+                      <p className="text-slate-600 leading-relaxed">
+                        A <strong>CSV or TSV</strong> catalogue — parsed locally in your browser, never uploaded. You choose
+                        which columns are sent to the model; empty cells appear as visible gaps (<code>NULL</code>). An
+                        optional <em>Collection Context</em> lets you add human framing.
+                      </p>
+                    </div>
+                    <div className="border-l-2 border-indigo-200 pl-3">
+                      <h3 className="font-semibold text-slate-800 mb-1">3 · Output</h3>
+                      <p className="text-slate-600 leading-relaxed">
+                        Per record: an AI-generated image (or a keyless <em>Demo</em> placeholder), notes you write, and
+                        multiple runs to compare. Everything exports as a <strong>ZIP</strong> — images plus a results CSV
+                        and a refusals/summary report.
+                      </p>
+                    </div>
+                  </div>
+                </details>
+
                 <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row items-center justify-between gap-6">
                   <div className="flex-1">
                     <h2 className="text-lg font-semibold mb-2 flex items-center gap-2">
