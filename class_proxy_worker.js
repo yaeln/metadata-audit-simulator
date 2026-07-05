@@ -14,9 +14,11 @@
 // 2. Left menu: "Workers & Pages"  →  Create  →  Workers  →  "Start with Hello World"
 //    →  give it a name (e.g. audit-proxy)  →  Deploy.
 // 3. Click "Edit code", delete the sample, PASTE THIS WHOLE FILE, then Deploy.
-// 4. Go to the Worker's  Settings  →  "Variables and Secrets"  →  add two:
+// 4. Go to the Worker's  Settings  →  "Variables and Secrets"  →  add secrets:
 //        Name: GEMINI_API_KEY   Value: <your billing-enabled Google key>   Type: Secret
 //        Name: CLASS_CODE       Value: <a word you pick, e.g. esu2026>     Type: Secret
+//        Name: OPENAI_API_KEY   Value: <your OpenAI key, sk-...>  (OPTIONAL — only if
+//                               you want students to use OpenAI models via the proxy)
 //    (Click "Encrypt"/Secret so they aren't shown in plain text. Then Deploy again.)
 // 5. Copy the Worker URL — it looks like:
 //        https://audit-proxy.YOURNAME.workers.dev
@@ -47,7 +49,7 @@ export default {
       return json({ error: 'Wrong or missing class code.' }, 403, cors);
     }
     if (!model || !prompt) return json({ error: 'Missing model or prompt.' }, 400, cors);
-    if (!env.GEMINI_API_KEY) return json({ error: 'Server is missing GEMINI_API_KEY — check Worker secrets.' }, 500, cors);
+    if (api !== 'openai' && !env.GEMINI_API_KEY) return json({ error: 'Server is missing GEMINI_API_KEY — check Worker secrets.' }, 500, cors);
 
     try {
       let image;
@@ -66,6 +68,35 @@ export default {
           return json({ refusal: p0.raiFilteredReason || p0.raiReason || 'No image returned — model blocked/filtered this record (safety refusal).' }, 200, cors);
         }
         image = `data:image/png;base64,${b64}`;
+
+      } else if (api === 'openai') {
+        if (!env.OPENAI_API_KEY) return json({ error: 'Server is missing OPENAI_API_KEY — check Worker secrets.' }, 500, cors);
+        const r = await fetch('https://api.openai.com/v1/images/generations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${env.OPENAI_API_KEY}` },
+          body: JSON.stringify({ model, prompt, n: 1, size: '1024x1024' })
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) {
+          const em = (d.error && (d.error.message || d.error.code)) || `OpenAI error ${r.status}`;
+          if (/safety|moderation|content[_\s-]?policy|rejected|not allowed|violat/i.test(em)) {
+            return json({ refusal: `OpenAI content policy: ${em}` }, 200, cors);
+          }
+          return json({ error: em }, r.status, cors);
+        }
+        const b64 = d.data && d.data[0] && d.data[0].b64_json;
+        if (b64) {
+          image = `data:image/png;base64,${b64}`;
+        } else {
+          const url = d.data && d.data[0] && d.data[0].url;
+          if (!url) return json({ refusal: 'OpenAI returned no image.' }, 200, cors);
+          const imgRes = await fetch(url);
+          const bytes = new Uint8Array(await imgRes.arrayBuffer());
+          let bin = '';
+          const CH = 0x8000;
+          for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+          image = `data:image/png;base64,${btoa(bin)}`;
+        }
 
       } else {
         const r = await fetch(
