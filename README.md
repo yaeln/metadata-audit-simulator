@@ -28,6 +28,22 @@ workshop).
    (one row per run: prompt, model, timestamp, collection context, and the
    original metadata) and a re-importable `session.json`.
 
+### What the export ZIP contains
+
+All file names carry the source file's name and the export time
+(`yyyymmdd-hhmm`, local time):
+
+- `audit_results_<source>_<yyyymmdd-hhmm>.csv`: one row per run. It starts
+  with `Source_File` and `Export_Time` (ISO), so rows stay traceable after
+  files from several exports are merged.
+- `refusals_<source>_<yyyymmdd-hhmm>.csv` and `summary.txt`.
+- `results_<source>_<yyyymmdd-hhmm>.html`: a results page. **Unzip first**,
+  then open it. It shows each record's generated runs next to the
+  **original image**, when any column holds an image URL, a IIIF `info.json`
+  or a IIIF manifest (v2 or v3; resolved in the browser). It has filters by
+  model, status and whether there's an original image.
+- `images/` and `session.json` (for re-import).
+
 ## Try it with no key and no cost
 
 Open the app, tick **Demo mode (no API)**, load a CSV, and generate. Demo mode
@@ -59,6 +75,29 @@ is blocked on free keys). Two ways:
   any column, then step through or jump to a random matching record.
 - **Session autosave** (in-browser) and **ZIP export/import** for resumable,
   archivable sessions. Export filenames include the dataset name and a timestamp.
+- **Omit empty fields** — optionally drop empty/`NULL` fields from the prompt
+  instead of showing them as gaps. Each run records the setting (`Omit_Empty`
+  in `audit_results.csv` and `refusals.csv`), so runs with and without gaps can
+  be compared.
+
+## Model availability (November 2026)
+
+Image models are retired often. Use **Detect** to see what a Google key can
+use, and **Custom model…** for IDs not in the list.
+
+The menu groups models by status (checked 9 Nov 2026 against the
+[Google AI Studio deprecations page](https://aistudio.google.com/docs/deprecations)
+and the [OpenAI deprecations page](https://developers.openai.com/api/docs/deprecations)):
+
+- **Google, current:** `gemini-nano-banana-2.1`, `gemini-3.1-flash-lite-image`,
+  `gemini-3.1-flash-image`, `gemini-3-pro-image`.
+- **OpenAI, current:** `gpt-image-2.6-sunburst`, `gpt-image-2.6-flare`,
+  `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`.
+- **Deprecated, still working:** `gemini-2.5-flash-image` (until at least
+  15 Mar 2027; the default, shared with the July 2026 runs), `gpt-image-1.5`
+  and `gpt-image-1-mini` (until 1 Dec 2026).
+- **Shut down, kept for the record:** `imagen-4.0-generate-001` (17 Aug 2026),
+  `gpt-image-1` (23 Oct 2026), `dall-e-3` (12 May 2026). Calls to these fail.
 
 ## Privacy
 

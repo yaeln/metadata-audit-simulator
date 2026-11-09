@@ -12,8 +12,8 @@
     <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 
-    <!-- Load Babel for in-browser JSX parsing (major pinned to 7.x) -->
-    <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+    <!-- Load Babel for in-browser JSX parsing (exact version pinned for reproducibility) -->
+    <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
 
     <!-- Load JSZip for creating / reading the export bundle (pinned) -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -30,15 +30,39 @@
         // Tiers are approximate and change over time — students should check
         // Google's current pricing/availability for their own key.
         // Model availability changes and varies by key/region — use the "Detect"
-        // button to list exactly what a given key supports. These are the two that
-        // are broadly current; older IDs (e.g. imagen-3.0-*, gemini-2.0-*-image)
-        // now 404 on many keys.
-        const MODELS = [
-          { id: 'imagen-4.0-generate-001',                  label: 'Imagen 4 — highest quality',            api: 'imagen', tier: 'Google — usually requires billing' },
-          { id: 'gemini-2.5-flash-image',                   label: 'Gemini 2.5 Flash Image ("Nano Banana")', api: 'gemini', tier: 'Google — may require billing' },
-          { id: 'gpt-image-1',                              label: 'OpenAI GPT-Image-1 (best at in-image text)', api: 'openai', tier: 'OpenAI key — requires OpenAI billing' },
-          { id: 'dall-e-3',                                 label: 'OpenAI DALL·E 3',                        api: 'openai', tier: 'OpenAI key — requires OpenAI billing' },
+        // button to list exactly what a given key supports, and "Custom model…" for
+        // newer IDs. Status checked 9 Nov 2026 against the Google AI Studio and
+        // OpenAI deprecation pages. Shut-down models stay in the menu so older
+        // sessions can be read and replication attempts are documented; a call to
+        // them fails with the provider's error.
+        const MODEL_GROUPS = [
+          { key: 'google',  label: 'Google — current' },
+          { key: 'openai',  label: 'OpenAI — current' },
+          { key: 'ending',  label: 'Deprecated — still working for now' },
+          { key: 'retired', label: 'Shut down — kept for the record' },
         ];
+        const MODELS = [
+          { id: 'gemini-nano-banana-2.1',      group: 'google',  label: 'Gemini Nano Banana 2.1',                         api: 'gemini', tier: 'Google — requires billing. Current main model.' },
+          { id: 'gemini-3.1-flash-lite-image', group: 'google',  label: 'Gemini 3.1 Flash-Lite Image (cheapest)',         api: 'gemini', tier: 'Google — requires billing. Fastest and cheapest.' },
+          { id: 'gemini-3.1-flash-image',      group: 'google',  label: 'Gemini 3.1 Flash Image',                         api: 'gemini', tier: 'Google — requires billing. Previous generation.' },
+          { id: 'gemini-3-pro-image',          group: 'google',  label: 'Gemini 3 Pro Image (premium)',                   api: 'gemini', tier: 'Google — requires billing. Most expensive.' },
+          { id: 'gpt-image-2.6-sunburst',      group: 'openai',  label: 'OpenAI GPT-Image-2.6 Sunburst',                  api: 'openai', tier: 'OpenAI — requires billing. Detailed work.' },
+          { id: 'gpt-image-2.6-flare',         group: 'openai',  label: 'OpenAI GPT-Image-2.6 Flare (fast)',              api: 'openai', tier: 'OpenAI — requires billing. Fast iteration.' },
+          { id: 'gpt-image-2.5-sunburst',      group: 'openai',  label: 'OpenAI GPT-Image-2.5 Sunburst',                  api: 'openai', tier: 'OpenAI — requires billing.' },
+          { id: 'gpt-image-2.5-flare',         group: 'openai',  label: 'OpenAI GPT-Image-2.5 Flare (fast)',              api: 'openai', tier: 'OpenAI — requires billing.' },
+          { id: 'gemini-2.5-flash-image',      group: 'ending',  label: 'Gemini 2.5 Flash Image (deprecated — until ≥ 15 Mar 2027)', api: 'gemini', tier: 'Google — requires billing. Deprecated; used in the July 2026 runs.' },
+          { id: 'gpt-image-1.5',               group: 'ending',  label: 'OpenAI GPT-Image-1.5 (deprecated — until 1 Dec 2026)',       api: 'openai', tier: 'OpenAI — requires billing. Deprecated.' },
+          { id: 'gpt-image-1-mini',            group: 'ending',  label: 'OpenAI GPT-Image-1 Mini (deprecated — until 1 Dec 2026)',    api: 'openai', tier: 'OpenAI — requires billing. Deprecated.' },
+          { id: 'imagen-4.0-generate-001',     group: 'retired', label: 'Imagen 4 (deprecated — shut down 17 Aug 2026)',              api: 'imagen', tier: 'Shut down; calls will fail.' },
+          { id: 'gpt-image-1',                 group: 'retired', label: 'OpenAI GPT-Image-1 (deprecated — shut down 23 Oct 2026)',    api: 'openai', tier: 'Shut down; calls will fail.' },
+          { id: 'dall-e-3',                    group: 'retired', label: 'OpenAI DALL·E 3 (deprecated — shut down 12 May 2026)',       api: 'openai', tier: 'Shut down; calls will fail.' },
+        ];
+        // Default: the one model shared with the July 2026 pilot runs.
+        const DEFAULT_MODEL = 'gemini-2.5-flash-image';
+        // Task framing placed before context + metadata. Kept neutral on purpose:
+        // no style ("photorealistic"), no object type ("the item"), so it states
+        // the task without adding information the record doesn't have.
+        const DEFAULT_INSTRUCTION = 'Generate an image based on the following catalogue metadata.';
         const CUSTOM = '__custom__';
 
         // --- IndexedDB helpers (store full sessions, incl. base64 images) ---
@@ -218,6 +242,117 @@
           return { image: `data:${mime};base64,${inline.data}` };
         }
 
+        // --- Results page written into each export ZIP ------------------------
+        // Self-contained HTML: one card per audited record, the original image
+        // (if the record has an image / IIIF info.json / IIIF manifest URL in any
+        // column) next to every generated run. IIIF manifests are resolved in the
+        // viewer's browser at viewing time (v2 and v3).
+        function buildResultsHtml(data) {
+          const json = JSON.stringify(data).replace(/</g, '\\u003c');
+          return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audit results — ${String(data.sourceFile).replace(/[<>&"]/g, '')}</title>
+<style>
+:root{--bg:#f8fafc;--card:#fff;--fg:#0f172a;--mut:#64748b;--line:#e2e8f0;--acc:#4f46e5;--bad:#b91c1c;--chip:#eef2ff}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1120;--card:#111827;--fg:#e5e7eb;--mut:#94a3b8;--line:#1f2937;--acc:#a5b4fc;--bad:#fca5a5;--chip:#1e1b4b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+header{position:sticky;top:0;z-index:2;background:var(--bg);border-bottom:1px solid var(--line);padding:12px 16px}
+h1{font-size:18px;margin:0 0 4px}.meta{color:var(--mut);font-size:12px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.bar input,.bar select{font:inherit;padding:4px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
+main{padding:16px;display:grid;gap:16px;max-width:1400px;margin:auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
+.card h2{font-size:15px;margin:0 0 8px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+figure{margin:0;border:1px solid var(--line);border-radius:8px;padding:8px;min-width:0}
+figure img{width:100%;height:260px;object-fit:contain;background:#00000010;border-radius:4px;cursor:zoom-in}
+figcaption{font-size:12px;color:var(--mut);margin-top:6px;overflow-wrap:anywhere}
+.orig{border-color:var(--acc)}.lbl{font-weight:600;color:var(--fg)}
+.chip{display:inline-block;background:var(--chip);border-radius:999px;padding:0 8px;margin:2px 4px 0 0;font-size:11px;color:var(--fg)}
+.refused{color:var(--bad);font-size:13px;height:260px;display:flex;align-items:center;justify-content:center;text-align:center;border:1px dashed var(--bad);border-radius:4px;padding:8px}
+.none{color:var(--mut);height:260px;display:flex;align-items:center;justify-content:center;text-align:center;border:1px dashed var(--line);border-radius:4px;padding:8px}
+details{margin-top:8px}summary{cursor:pointer;color:var(--mut);font-size:12px}
+table{border-collapse:collapse;width:100%;font-size:12px}td{border-top:1px solid var(--line);padding:3px 6px;vertical-align:top;overflow-wrap:anywhere}td:first-child{color:var(--mut);white-space:nowrap}
+.prompt{font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--mut)}
+a{color:var(--acc)}
+#zoom{position:fixed;inset:0;background:#000c;display:none;align-items:center;justify-content:center;z-index:9}#zoom img{max-width:95vw;max-height:95vh}
+</style></head><body>
+<header><h1>Metadata audit — results</h1>
+<div class="meta" id="meta"></div>
+<div class="bar"><input id="q" placeholder="Search records…" size="24">
+<select id="fm"><option value="">All models</option></select>
+<select id="fs"><option value="">All statuses</option><option value="ok">Generated</option><option value="refused">Refused</option></select>
+<select id="fo"><option value="">Any original</option><option value="yes">Has original image</option><option value="no">No original image</option></select></div>
+</header>
+<main id="list"></main><div id="zoom"><img alt=""></div>
+<script>
+const DATA = ${json};
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const URL_RE = /https?:\\/\\/[^\\s|,;"']+/g;
+const PRI = /iiif|manifest|image|thumb|img|picture|media|url|link/i;
+function findMedia(row){
+  const keys = Object.keys(row).sort((a,b)=>(PRI.test(b)?1:0)-(PRI.test(a)?1:0));
+  const links = [];
+  for (const k of keys){ for (const u of (String(row[k]||'').match(URL_RE)||[])){
+    if (/\\/info\\.json$/i.test(u)) return {kind:'image', url:u.replace(/\\/info\\.json$/i,'/full/800,/0/default.jpg'), field:k};
+    if (/\\.(jpe?g|png|gif|webp|tiff?)(\\?|$)/i.test(u) || /\\/full\\/[^/]+\\/\\d+\\/default\\./.test(u)) return {kind:'image', url:u, field:k};
+    if (/manifest(\\.json)?(\\?|$)/i.test(u)) return {kind:'manifest', url:u, field:k};
+    links.push({k,u});
+  }}
+  return {kind:'none', links};
+}
+async function fromManifest(url){
+  const m = await (await fetch(url)).json();
+  let res, svc;
+  if (m.sequences){ res = m.sequences[0].canvases[0].images[0].resource; svc = res.service && (res.service['@id']||res.service.id); }
+  else { res = m.items[0].items[0].items[0].body; const s = [].concat(res.service||[])[0]; svc = s && (s['@id']||s.id); }
+  return svc ? svc.replace(/\\/$/,'') + '/full/800,/0/default.jpg' : (res['@id']||res.id);
+}
+const models = new Set();
+DATA.records.forEach(r => (r.runs||[]).forEach(x => x.model && models.add(x.model)));
+const fm = document.getElementById('fm'); [...models].sort().forEach(m => fm.insertAdjacentHTML('beforeend', '<option>'+esc(m)+'</option>'));
+const nRuns = DATA.records.reduce((a,r)=>a+(r.runs||[]).length,0);
+document.getElementById('meta').innerHTML = 'Source file: <b>'+esc(DATA.sourceFile)+'</b> · exported '+esc(new Date(DATA.exportIso).toLocaleString())+' · '+DATA.records.length+' records · '+nRuns+' runs';
+const list = document.getElementById('list');
+const cards = DATA.records.map(r => {
+  const row = r.row || {}; const media = findMedia(row);
+  const title = row.title || row.Title || row.title_he || row.title_en || row['dcterms:title'] || row.name || row['שם'] || row.sample_id || ('Row ' + r.index);
+  const el = document.createElement('section'); el.className = 'card';
+  let orig;
+  if (media.kind === 'none') orig = '<div class="none">No image URL in this record'+(media.links.length?'<br>'+media.links.slice(0,3).map(l=>'<a href="'+esc(l.u)+'" target="_blank">'+esc(l.k)+'</a>').join(' · '):'')+'</div>';
+  else orig = '<img alt="original" loading="lazy" data-kind="'+media.kind+'" data-src="'+esc(media.url)+'">';
+  const runs = (r.runs||[]).map(x => {
+    const tags = ['<span class="chip">'+esc(x.model||'?')+'</span>', '<span class="chip">instruction '+(x.instruction?'on':'off')+'</span>', '<span class="chip">context '+(x.context?'on':'off')+'</span>','<span class="chip">empty fields '+(x.omitEmpty===true?'omitted':x.omitEmpty===false?'kept':'?')+'</span>'].join('');
+    const body = x.status === 'refused' || !x.file ? '<div class="refused">Refused / no image<br>'+esc(x.refusalReason||'')+'</div>' : '<img alt="generated" loading="lazy" src="'+esc(x.file)+'">';
+    return '<figure data-model="'+esc(x.model)+'" data-status="'+esc(x.status||'ok')+'">'+body+'<figcaption><span class="lbl">Run '+x.run+'</span> · '+esc((x.timestamp||'').slice(0,16).replace('T',' '))+'<br>'+tags+'<details><summary>Prompt</summary><div class="prompt" dir="auto">'+esc(x.promptText)+'</div></details></figcaption></figure>';
+  }).join('');
+  const rec = Object.keys(row).map(k => { const v = String(row[k]||''); return '<tr><td>'+esc(k)+'</td><td dir="auto">'+(/^https?:/.test(v)?'<a href="'+esc(v)+'" target="_blank">'+esc(v)+'</a>':esc(v))+'</td></tr>'; }).join('');
+  el.innerHTML = '<h2 dir="auto">'+esc(title)+' <span class="meta">· row '+r.index+'</span></h2><div class="grid"><figure class="orig">'+orig+'<figcaption><span class="lbl">Original</span>'+(media.field?' · from <code>'+esc(media.field)+'</code>':'')+'</figcaption></figure>'+runs+'</div>'+(r.auditNotes?'<p dir="auto"><b>Notes:</b> '+esc(r.auditNotes)+'</p>':'')+'<details><summary>Full original record</summary><table>'+rec+'</table></details>';
+  el.dataset.text = (Object.values(row).join(' ')+' '+(r.auditNotes||'')).toLowerCase();
+  el.dataset.hasorig = media.kind === 'none' ? 'no' : 'yes';
+  list.appendChild(el); return el;
+});
+const io = new IntersectionObserver(es => es.forEach(async e => {
+  if (!e.isIntersecting) return; const img = e.target; io.unobserve(img);
+  try { img.src = img.dataset.kind === 'manifest' ? await fromManifest(img.dataset.src) : img.dataset.src; }
+  catch(err){ img.replaceWith(Object.assign(document.createElement('div'),{className:'none',textContent:'Could not load original ('+err.message+')'})); }
+}), {rootMargin:'400px'});
+document.querySelectorAll('img[data-src]').forEach(i => io.observe(i));
+function apply(){
+  const q = document.getElementById('q').value.toLowerCase(), m = fm.value, s = document.getElementById('fs').value, o = document.getElementById('fo').value;
+  cards.forEach(c => {
+    let any = false;
+    c.querySelectorAll('figure[data-status]').forEach(f => { const ok = (!m||f.dataset.model===m)&&(!s||f.dataset.status===s); f.style.display = ok?'':'none'; any = any||ok; });
+    const noRuns = !c.querySelector('figure[data-status]');
+    c.style.display = (!q||c.dataset.text.includes(q)) && (!o||c.dataset.hasorig===o) && (any||(noRuns&&!m&&!s)) ? '' : 'none';
+  });
+}
+['q','fm','fs','fo'].forEach(id => document.getElementById(id).addEventListener('input', apply));
+const zoom = document.getElementById('zoom');
+document.addEventListener('click', e => { if (e.target.tagName==='IMG' && e.target.closest('figure')) { zoom.querySelector('img').src = e.target.src; zoom.style.display='flex'; } else if (e.target.closest('#zoom')) zoom.style.display='none'; });
+<\/script></body></html>`;
+        }
+
         async function callOpenAI(model, key, prompt) {
           const body = { model, prompt, n: 1, size: '1024x1024' };
           let res;
@@ -242,7 +377,7 @@
               throw new Error(`OpenAI: no credits / billing not set up. Add a payment method + credits at platform.openai.com → Billing. ${em}`);
             }
             if (/does not exist|do not have access|model_not_found/i.test(em)) {
-              throw new Error(`OpenAI: this model isn't available to your account/key yet. Usually one of: (1) no credit balance added (platform.openai.com → Billing → "Add to credit balance"); (2) gpt-image-1 needs one-time Organization Verification (Settings → Organization → General → Verify); (3) a restricted project key that excludes this model. ${em}`);
+              throw new Error(`OpenAI: this model isn't available to your account/key. Usually one of: (0) the model has been shut down (see the "Shut down" group in the menu); (1) no credit balance added (platform.openai.com → Billing → "Add to credit balance"); (2) GPT-Image models need one-time Organization Verification (Settings → Organization → General → Verify); (3) a restricted project key that excludes this model. ${em}`);
             }
             if (res.status === 429) throw new Error(`OpenAI rate limit (429) — wait and retry. ${em}`);
             throw new Error(`OpenAI error (${res.status}). ${em}`);
@@ -301,7 +436,7 @@
 
         function App() {
           const [apiKey, setApiKey] = useState('');
-          const [modelId, setModelId] = useState(MODELS[0].id);
+          const [modelId, setModelId] = useState(DEFAULT_MODEL);
           const [customModelId, setCustomModelId] = useState('');
           const [customApiType, setCustomApiType] = useState('imagen');
           const [demoMode, setDemoMode] = useState(false);
@@ -314,6 +449,7 @@
           const [filterText, setFilterText] = useState('');
           const [onlyRefusals, setOnlyRefusals] = useState(false);
           const [collectionContext, setCollectionContext] = useState('');
+          const [instruction, setInstruction] = useState(DEFAULT_INSTRUCTION);
           const [omitEmpty, setOmitEmpty] = useState(false);
 
           const [csvData, setCsvData] = useState([]);
@@ -340,7 +476,7 @@
 
           const activeModel = useMemo(() => {
             if (modelId === CUSTOM) return { id: customModelId.trim(), api: customApiType, tier: 'custom — verify availability', label: 'Custom' };
-            return [...MODELS, ...discovered].find(m => m.id === modelId) || MODELS[0];
+            return [...MODELS, ...discovered].find(m => m.id === modelId) || MODELS.find(m => m.id === DEFAULT_MODEL);
           }, [modelId, customModelId, customApiType, discovered]);
 
           // Ask the API which image-capable models this key can actually use.
@@ -472,6 +608,7 @@
                       setSessionData(saved.sessionData);
                       if (saved.selectedColumns) setSelectedColumns(saved.selectedColumns);
                       if (saved.collectionContext) setCollectionContext(saved.collectionContext);
+                      if (typeof saved.instruction === 'string') setInstruction(saved.instruction);
                       setCurrentIndex(0);
                       const first = normalizeRecord(saved.sessionData[0]);
                       const lastRun = first.runs.length ? first.runs[first.runs.length - 1] : null;
@@ -494,11 +631,11 @@
             if (Object.keys(sessionData).length === 0 && !collectionContext) return;
             if (saveTimer.current) clearTimeout(saveTimer.current);
             saveTimer.current = setTimeout(() => {
-              idbSet(datasetKey, { sessionData, selectedColumns, columns, rows: csvData, datasetName, collectionContext, savedAt: Date.now() })
+              idbSet(datasetKey, { sessionData, selectedColumns, columns, rows: csvData, datasetName, collectionContext, instruction, savedAt: Date.now() })
                 .then(() => setLastSaved(new Date()))
                 .catch(() => {});
             }, 600);
-          }, [sessionData, selectedColumns, datasetKey, collectionContext]);
+          }, [sessionData, selectedColumns, datasetKey, collectionContext, instruction]);
 
           const saveCurrentToSession = () => {
             if (currentIndex < 0) return;
@@ -590,7 +727,9 @@
               .map(field => `${field.toUpperCase()}: ${isEmptyValue(row[field]) ? 'NULL' : row[field]}`)
               .join(' | ');
             const ctx = collectionContext.trim();
-            return ctx ? `COLLECTION CONTEXT: ${ctx} | ${fields}` : fields;
+            const instr = instruction.trim();
+            const body = ctx ? `COLLECTION CONTEXT: ${ctx} | ${fields}` : fields;
+            return instr ? `${instr} | ${body}` : body;
           };
 
           const handleGenerate = async () => {
@@ -641,6 +780,8 @@
                 selectedColumns: [...selectedColumns],
                 model: usedModel,
                 context: collectionContext.trim(),
+                instruction: instruction.trim(),
+                omitEmpty: omitEmpty,
                 status: refused ? 'refused' : 'ok',
                 refusalReason: refused ? (result.refusal || 'No image returned.') : ''
               };
@@ -683,6 +824,15 @@
             const zip = new JSZip();
             const imgFolder = zip.folder("images");
 
+            // One timestamp for the whole export: local time, yyyymmdd-hhmm in file
+            // names (colons are not allowed in file names), full ISO in the CSV.
+            const exportDate = new Date();
+            const pad2 = (n) => String(n).padStart(2, '0');
+            const stamp = `${exportDate.getFullYear()}${pad2(exportDate.getMonth() + 1)}${pad2(exportDate.getDate())}-${pad2(exportDate.getHours())}${pad2(exportDate.getMinutes())}`;
+            const exportIso = exportDate.toISOString();
+            const sourceFile = datasetName || '(unnamed)';
+            const baseName = (datasetName || 'dataset').replace(/\.(csv|tsv|txt)$/i, '').replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'dataset';
+
             const allUsedColsSet = new Set();
             auditedIndices.forEach(idx => {
               normalizeRecord(sessionData[idx]).runs.forEach(run => {
@@ -692,8 +842,8 @@
             const dynamicHeaders = Array.from(allUsedColsSet);
 
             const csvHeaders = [
-              "Original_Row_Index", "Run", "File", "AI_Model_Version", "Audit_Timestamp",
-              "Collection_Context", "Audit_Prompt", "Audit_Notes", "Status", "Refusal_Reason",
+              "Source_File", "Export_Time", "Original_Row_Index", "Run", "File", "AI_Model_Version", "Audit_Timestamp",
+              "Collection_Context", "Audit_Prompt", "Audit_Notes", "Status", "Refusal_Reason", "Omit_Empty", "Instruction",
               ...dynamicHeaders.map(h => `Original_${h}`)
             ];
 
@@ -717,7 +867,7 @@
 
               if (rec.runs.length === 0) {
                 // notes-only record (no image generated) — still emit a row
-                const rowData = [idx, "", "", "", "", "", "", rec.auditNotes || "", "", ""];
+                const rowData = [sourceFile, exportIso, idx, "", "", "", "", "", "", rec.auditNotes || "", "", "", "", ""];
                 dynamicHeaders.forEach(col => rowData.push(sourceRow[col] || ""));
                 csvRows.push(rowData.map(escapeCSV).join(","));
               } else {
@@ -734,21 +884,24 @@
                   modelStats[mk] = modelStats[mk] || { ok: 0, refused: 0 };
                   if (status === 'refused') {
                     modelStats[mk].refused++;
-                    refusedList.push({ idx, run: n + 1, model: mk, reason: run.refusalReason || '', prompt: run.promptText || '', id: pickId(sourceRow) });
+                    refusedList.push({ idx, run: n + 1, model: mk, reason: run.refusalReason || '', prompt: run.promptText || '', id: pickId(sourceRow), omitEmpty: run.omitEmpty === undefined ? '' : String(run.omitEmpty) });
                   } else {
                     modelStats[mk].ok++;
                   }
                   const rowData = [
-                    idx, n + 1, fileRef,
+                    sourceFile, exportIso, idx, n + 1, fileRef,
                     run.model || "", run.timestamp || "", run.context || "", run.promptText || "", rec.auditNotes || "",
-                    status, run.refusalReason || ""
+                    status, run.refusalReason || "",
+                    run.omitEmpty === undefined ? "" : String(run.omitEmpty),
+                    run.instruction || ""
                   ];
                   dynamicHeaders.forEach(col => rowData.push(sourceRow[col] || ""));
                   csvRows.push(rowData.map(escapeCSV).join(","));
                   runRecords.push({
                     run: n + 1, file: fileRef, timestamp: run.timestamp || "", context: run.context || "",
                     promptText: run.promptText || "", selectedColumns: run.selectedColumns || [], model: run.model || "",
-                    status: status, refusalReason: run.refusalReason || ""
+                    status: status, refusalReason: run.refusalReason || "",
+                    omitEmpty: run.omitEmpty, instruction: run.instruction || ""
                   });
                 });
               }
@@ -756,13 +909,14 @@
               records.push({ index: idx, auditNotes: rec.auditNotes || "", runs: runRecords });
             });
 
-            zip.file("audit_results.csv", csvRows.join("\n"));
+            // BOM so Excel opens Hebrew and other non-Latin text correctly.
+            zip.file(`audit_results_${baseName}_${stamp}.csv`, '﻿' + csvRows.join("\n"));
 
             // --- Documentation of the refusal cases (human + machine readable) ---
             const summaryLines = [
               'METADATA AUDIT — SESSION SUMMARY',
               `Dataset: ${datasetName || '(unnamed)'}`,
-              `Exported: ${new Date().toISOString()}`,
+              `Exported: ${exportIso}`,
               '',
               `Records audited: ${auditedIndices.length}`,
               `Total generations: ${genCount}`,
@@ -781,16 +935,24 @@
             });
             zip.file('summary.txt', summaryLines.join('\n'));
 
-            const refHeaders = ['Original_Row_Index', 'Run', 'AI_Model_Version', 'Identifier', 'Refusal_Reason', 'Audit_Prompt'];
+            const refHeaders = ['Source_File', 'Export_Time', 'Original_Row_Index', 'Run', 'AI_Model_Version', 'Identifier', 'Refusal_Reason', 'Omit_Empty', 'Audit_Prompt'];
             const refRows = [refHeaders.join(',')].concat(
-              refusedList.map(r => [r.idx, r.run, r.model, r.id, r.reason, r.prompt].map(escapeCSV).join(','))
+              refusedList.map(r => [sourceFile, exportIso, r.idx, r.run, r.model, r.id, r.reason, r.omitEmpty, r.prompt].map(escapeCSV).join(','))
             );
-            zip.file('refusals.csv', refRows.join('\n'));
+            zip.file(`refusals_${baseName}_${stamp}.csv`, '﻿' + refRows.join('\n'));
+
+            // Self-contained results page: generated image next to the original
+            // (when the record carries an image / IIIF URL). Open it from the
+            // unzipped folder so the images/ paths resolve.
+            zip.file(`results_${baseName}_${stamp}.html`, buildResultsHtml({
+              sourceFile, exportIso,
+              records: records.map(r => ({ ...r, row: csvData[r.index] || {} }))
+            }));
 
             // Machine-readable session for re-import (fully resumable).
             zip.file("session.json", JSON.stringify({
-              exportedAt: new Date().toISOString(),
-              datasetName, columns, selectedColumns, collectionContext,
+              exportedAt: exportIso,
+              datasetName, columns, selectedColumns, collectionContext, instruction,
               rows: csvData,
               records
             }, null, 2));
@@ -801,8 +963,6 @@
             link.href = url;
             // Name includes the source CSV + a full date+time stamp, so exports are
             // traceable to their dataset and never overwrite each other.
-            const baseName = (datasetName || 'dataset').replace(/\.csv$/i, '').replace(/[^a-z0-9_-]+/gi, '_').replace(/^_+|_+$/g, '') || 'dataset';
-            const stamp = new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
             link.download = `Metadata_Audit_${baseName}_${stamp}.zip`;
             document.body.appendChild(link);
             link.click();
@@ -836,7 +996,8 @@
                       imageBase64: await loadImg(r.file),
                       timestamp: r.timestamp || '', promptText: r.promptText || '',
                       selectedColumns: r.selectedColumns || [], model: r.model || '', context: r.context || '',
-                      status: r.status || (r.file ? 'ok' : ''), refusalReason: r.refusalReason || ''
+                      status: r.status || (r.file ? 'ok' : ''), refusalReason: r.refusalReason || '',
+                      omitEmpty: r.omitEmpty, instruction: r.instruction || ''
                     });
                   }
                 } else if (rec.file || rec.imageBase64) {
@@ -856,6 +1017,8 @@
               setCsvData(rows);
               setDatasetName(meta.datasetName || 'imported session');
               setCollectionContext(meta.collectionContext || '');
+              // Sessions exported before the instruction existed had none.
+              setInstruction(typeof meta.instruction === 'string' ? meta.instruction : '');
               setSelectedColumns(meta.selectedColumns && meta.selectedColumns.length ? meta.selectedColumns : cols.slice(0, Math.min(4, cols.length)));
               setSessionData(newSession);
               setDatasetKey(rows.length ? fingerprint(cols, rows) : 'imported');
@@ -909,9 +1072,11 @@
                           onChange={(e) => setModelId(e.target.value)}
                           className="bg-white text-sm focus:outline-none text-slate-700"
                         >
-                          <optgroup label="Built-in">
-                            {MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-                          </optgroup>
+                          {MODEL_GROUPS.map(g => (
+                            <optgroup key={g.key} label={g.label}>
+                              {MODELS.filter(m => m.group === g.key).map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                            </optgroup>
+                          ))}
                           {discovered.length > 0 && (
                             <optgroup label="Detected on your key">
                               {discovered.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
@@ -991,7 +1156,7 @@
                         ? 'Demo mode: generates a local placeholder — no key needed, no data sent.'
                         : proxyUrl
                           ? `Using class proxy — no personal key needed. Model: ${activeModel.label || activeModel.id}.`
-                          : `${activeModel.label || activeModel.id || 'No model'} — ${activeModel.tier}. Tiers change; check Google's current pricing.`}
+                          : `${activeModel.label || activeModel.id || 'No model'} — ${activeModel.tier} Models and prices change; check the provider's current pricing.`}
                     </p>
                   </div>
                 </header>
@@ -1247,19 +1412,33 @@
                           <p className="text-xs text-indigo-600 mt-2">Context is active — it's added to every generation and recorded in the export.</p>
                         )}
                       </div>
+                    </div>
 
+                    <div className="space-y-6">
                       <div className="bg-slate-800 p-6 rounded-xl shadow-sm text-slate-100">
                         <h3 className="font-bold text-slate-200 mb-4 flex items-center gap-2"><IconChevronRight /> Zero-Shot Synthesis String</h3>
-                        <div className="bg-slate-900 p-4 rounded border border-slate-700 font-mono text-sm text-emerald-400 break-words max-h-40 overflow-auto">
+                        <label className="block text-xs font-semibold text-slate-300 mb-1">
+                          Instruction <span className="font-normal text-slate-400">(placed before the context and the metadata; leave empty to send none)</span>
+                        </label>
+                        <div className="flex gap-2 mb-4">
+                          <input
+                            type="text"
+                            value={instruction}
+                            onChange={(e) => setInstruction(e.target.value)}
+                            className="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                          {instruction !== DEFAULT_INSTRUCTION && (
+                            <button onClick={() => setInstruction(DEFAULT_INSTRUCTION)} className="text-xs text-indigo-300 hover:text-indigo-100 whitespace-nowrap">Reset</button>
+                          )}
+                        </div>
+                        <div className="bg-slate-900 p-4 rounded border border-slate-700 font-mono text-sm text-emerald-400 break-words max-h-40 overflow-auto" dir="auto">
                           {promptText || <span className="text-slate-600">Empty prompt string...</span>}
                         </div>
                         <button onClick={handleGenerate} disabled={isGenerating || selectedColumns.length === 0} className="w-full mt-6 bg-indigo-500 hover:bg-indigo-600 disabled:bg-slate-600 text-white px-4 py-3 rounded-lg font-medium transition-colors flex items-center justify-center gap-2">
                           {isGenerating ? <span className="animate-pulse">Generating Simulation...</span> : (demoMode ? "Generate (Demo — no AI)" : "Generate Audit Image")}
                         </button>
                       </div>
-                    </div>
 
-                    <div className="space-y-6">
                       <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[400px] flex flex-col">
                         <h3 className="font-bold text-slate-800 mb-4">Generated Output</h3>
                         <div className="flex-1 bg-slate-100 rounded-lg border-2 border-dashed border-slate-300 flex items-center justify-center overflow-hidden relative min-h-[300px]">
