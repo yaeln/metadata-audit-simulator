@@ -71,6 +71,14 @@ is blocked on free keys). Two ways:
 - **Collection Context** — optional background prepended to every prompt, so you
   can compare generations *with* and *without* human framing.
 - **Multiple runs per record** with a thumbnail history to compare outputs.
+- **Batch run** — generate for every record in view (all, or those matching the
+  Find filter) with the current configuration, one call per record, with a
+  progress bar and a Stop button. Records that already have a run with the same
+  prompt and model are skipped, so a stopped batch resumes where it left off and
+  changing a condition (context, instruction, empty fields, columns, model) runs
+  the set again.
+- **Select all / Clear all** for prompt columns (acts on the columns shown by
+  the column search).
 - **Find / Random** — filter by a column value (e.g. `type = IMAGE`) or search
   any column, then step through or jump to a random matching record.
 - **Session autosave** (in-browser) and **ZIP export/import** for resumable,
