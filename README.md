@@ -77,6 +77,10 @@ is blocked on free keys). Two ways:
   prompt and model are skipped, so a stopped batch resumes where it left off and
   changing a condition (context, instruction, empty fields, columns, model) runs
   the set again.
+- **Original vs. generated while auditing** — when a record has an image URL,
+  IIIF `info.json` or IIIF manifest in any column, the original is shown next
+  to the generated image. It stays hidden until the record's first run (so it
+  doesn't steer the reading of the prompt); "Show original now" reveals it.
 - **Select all / Clear all** for prompt columns (acts on the columns shown by
   the column search).
 - **Find / Random** — filter by a column value (e.g. `type = IMAGE`) or search

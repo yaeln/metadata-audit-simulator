@@ -353,6 +353,35 @@ document.addEventListener('click', e => { if (e.target.tagName==='IMG' && e.targ
 <\/script></body></html>`;
         }
 
+        // --- The original item's image, for the side-by-side view --------------
+        // Same rules as the exported results page: any column may hold a direct
+        // image URL, a IIIF info.json, or a IIIF manifest (v2 or v3). Columns whose
+        // names suggest images are looked at first.
+        const MEDIA_URL_RE = /https?:\/\/[^\s|,;"']+/g;
+        const MEDIA_COL_RE = /iiif|manifest|image|thumb|img|picture|media|url|link/i;
+        function findOriginalMedia(row) {
+          if (!row) return null;
+          const keys = Object.keys(row).sort((a, b) => (MEDIA_COL_RE.test(b) ? 1 : 0) - (MEDIA_COL_RE.test(a) ? 1 : 0));
+          for (const k of keys) {
+            for (const u of (String(row[k] || '').match(MEDIA_URL_RE) || [])) {
+              if (/\/info\.json$/i.test(u)) return { kind: 'image', url: u.replace(/\/info\.json$/i, '/full/800,/0/default.jpg'), field: k };
+              if (/\.(jpe?g|png|gif|webp|tiff?)(\?|$)/i.test(u) || /\/full\/[^/]+\/\d+\/default\./.test(u)) return { kind: 'image', url: u, field: k };
+              if (/manifest(\.json)?(\?|$)/i.test(u)) return { kind: 'manifest', url: u, field: k };
+            }
+          }
+          return null;
+        }
+        async function resolveOriginalSrc(media) {
+          if (media.kind === 'image') return media.url;
+          const res = await fetch(media.url);
+          if (!res.ok) throw new Error(`manifest ${res.status}`);
+          const m = await res.json();
+          let r, svc;
+          if (m.sequences) { r = m.sequences[0].canvases[0].images[0].resource; svc = r.service && (r.service['@id'] || r.service.id); }
+          else { r = m.items[0].items[0].items[0].body; const s = [].concat(r.service || [])[0]; svc = s && (s['@id'] || s.id); }
+          return svc ? svc.replace(/\/$/, '') + '/full/800,/0/default.jpg' : (r['@id'] || r.id);
+        }
+
         async function callOpenAI(model, key, prompt) {
           const body = { model, prompt, n: 1, size: '1024x1024' };
           let res;
@@ -1107,6 +1136,29 @@ document.addEventListener('click', e => { if (e.target.tagName==='IMG' && e.targ
           }, [columns, columnSearch]);
 
           const selectedRow = currentIndex >= 0 ? csvData[currentIndex] : null;
+
+          // Original image of the current record (resolved once per URL, cached).
+          // Hidden until the record has a run, so the original doesn't steer the
+          // reading of the prompt; "Show original now" reveals it earlier.
+          const originalCache = useRef({});
+          const [original, setOriginal] = useState({ status: 'none' });
+          const [revealOriginal, setRevealOriginal] = useState(false);
+          useEffect(() => {
+            setRevealOriginal(false);
+            const media = findOriginalMedia(selectedRow);
+            if (!media) { setOriginal({ status: 'none' }); return; }
+            const cached = originalCache.current[media.url];
+            if (cached) { setOriginal({ status: 'ok', src: cached, field: media.field, link: media.url }); return; }
+            let live = true;
+            setOriginal({ status: 'loading', field: media.field, link: media.url });
+            resolveOriginalSrc(media)
+              .then(src => { originalCache.current[media.url] = src; if (live) setOriginal({ status: 'ok', src, field: media.field, link: media.url }); })
+              .catch(err => { if (live) setOriginal({ status: 'error', field: media.field, link: media.url, message: err.message }); });
+            return () => { live = false; };
+          }, [currentIndex, csvData]);
+          const currentHasRuns = normalizeRecord(sessionData[currentIndex]).runs.length > 0;
+          const showOriginal = original.status !== 'none' && (currentHasRuns || revealOriginal);
+
           const promptText = buildPrompt();
           const itemsAuditedCount = Object.keys(sessionData).length;
           const totalRuns = Object.values(sessionData).reduce((s, rec) => s + normalizeRecord(rec).runs.length, 0);
@@ -1552,7 +1604,33 @@ document.addEventListener('click', e => { if (e.target.tagName==='IMG' && e.targ
                       </div>
 
                       <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 min-h-[400px] flex flex-col">
-                        <h3 className="font-bold text-slate-800 mb-4">Generated Output</h3>
+                        <h3 className="font-bold text-slate-800 mb-4">{original.status === 'none' ? 'Generated Output' : 'Original vs. Generated'}</h3>
+                        <div className={`flex-1 ${original.status === 'none' ? 'flex' : 'grid grid-cols-1 sm:grid-cols-2 gap-3'}`}>
+                        {original.status !== 'none' && (
+                          <div className="flex flex-col min-w-0">
+                            <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+                              <span className="font-semibold text-slate-700">Original</span>
+                              <a href={original.link} target="_blank" rel="noopener" className="truncate ml-2 text-indigo-600 hover:text-indigo-800" title={original.link}>from {original.field}</a>
+                            </div>
+                            <div className="flex-1 bg-slate-100 rounded-lg border-2 border-indigo-200 flex items-center justify-center overflow-hidden min-h-[300px]">
+                              {!showOriginal && (
+                                <div className="text-slate-400 text-center p-4 text-sm">
+                                  <p className="mb-2">Hidden until you generate, so it doesn't steer your reading of the record.</p>
+                                  <button onClick={() => setRevealOriginal(true)} className="text-indigo-600 hover:text-indigo-800 font-medium">Show original now</button>
+                                </div>
+                              )}
+                              {showOriginal && original.status === 'loading' && <div className="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>}
+                              {showOriginal && original.status === 'ok' && (
+                                <a href={original.src} target="_blank" rel="noopener" className="w-full h-full flex"><img src={original.src} alt="Original item" className="w-full h-full object-contain" onError={() => setOriginal(o => ({ ...o, status: 'error', message: 'image did not load' }))} /></a>
+                              )}
+                              {showOriginal && original.status === 'error' && (
+                                <p className="text-sm text-rose-600 text-center p-4">Could not load the original ({original.message}). <a href={original.link} target="_blank" rel="noopener" className="underline">Open the link</a></p>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex flex-col min-w-0 flex-1">
+                        {original.status !== 'none' && <div className="text-xs font-semibold text-slate-700 mb-1">Generated</div>}
                         <div className="flex-1 bg-slate-100 rounded-lg border-2 border-dashed border-slate-300 flex items-center justify-center overflow-hidden relative min-h-[300px]">
                           {isGenerating && (
                             <div className="absolute inset-0 bg-slate-100/90 flex flex-col items-center justify-center z-10 backdrop-blur-sm">
@@ -1565,6 +1643,8 @@ document.addEventListener('click', e => { if (e.target.tagName==='IMG' && e.targ
                           {!generatedImage && !isGenerating && (
                             <div className="text-slate-400 flex flex-col items-center text-center p-6"><IconImage size={48} className="mb-2 opacity-50" /><p>Run generation to view AI interpretation.</p></div>
                           )}
+                        </div>
+                        </div>
                         </div>
                         {(() => {
                           const runs = normalizeRecord(sessionData[currentIndex]).runs;
